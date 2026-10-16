@@ -311,7 +311,17 @@ silent commands don't.
 **Progress.** `--progress jsonl` writes events to stderr:
 `{"v": 1, "event": "op" | "progress" | "log" | "step" | "heartbeat", ...}`.
 
-**Advice** (`data.advice` of `train`, `data.pipeline.advice`) suggests how to get
+**Verdict** (`data.verdict`): `outcome` is `better`, `worse` or
+`no_clear_change`. A `no_clear_change` has a `reason`: `no_difference` (the
+test could have seen a typical gain of about 0.05 and didn't) or
+`too_few_test_documents` (it couldn't: the verdict is inconclusive).
+`permutation_p` is an exact sign-flip p-value next to the t-test's
+`p_value`, and with real searches `agreement` says whether they agree with
+the generated test. Real searches decide the verdict once there are 30 or
+more about 10+ documents.
+
+**Advice** (`data.advice` of `train`, `data.pipeline.advice`, and of
+`train --dry-run`) suggests how to get
 a better result: `code`, `severity`, `message`, `evidence`, `action`
 (`command`, and `config` to set first), `applicability`.
 
@@ -321,13 +331,15 @@ a better result: `code`, `severity`, `message`, `evidence`, `action`
 | `CHUNKS_TRUNCATED` | Over 5% of chunks are longer than the model reads |
 | `CHUNK_CHARS_DEPRECATED` | `dataset.chunk_chars` is set |
 | `FEW_TRAINING_STEPS` | Training ran under 100 steps |
-| `TEST_SET_UNDERPOWERED` | The verdict's 95% interval is wider than ±0.05 |
+| `TEST_SET_UNDERPOWERED` | The verdict's 95% interval is wider than ±0.05; also in `train --dry-run` (`evidence.predicted`) when the test will have too few documents to see a typical gain |
 | `TEST_SET_TOO_EASY` | The base model already scores 0.95+ on the test |
 | `QUERIES_FILTERED_HEAVILY` | The query filter dropped over 40% of training queries |
 | `MANY_UNMINED_NEGATIVES` | Over 20% of training queries had no safe hard negative |
 | `LANG_REGRESSION` | One language got worse |
 | `GENERAL_REGRESSION` | The general check got clearly worse (≥0.02) |
 | `PREFIX_DROPPED_BY_TARGET` | The export target won't add the model's prefixes |
+| `REAL_QUERIES_FEW_DOCUMENTS` | Real searches exist but are under 30, or about under 10 documents, so they don't decide yet |
+| `SYNTHETIC_REAL_DISAGREE` | Generated test queries and real searches reach different verdicts |
 
 | Error code | Meaning |
 |---|---|

@@ -244,6 +244,10 @@ fn render_preview(preview: &Preview, would: &str) -> String {
     if preview.up_to_date() && preview.blockers.is_empty() {
         out.push_str("\nEverything is up to date.");
     }
+    if !preview.advice.is_empty() {
+        out.push('\n');
+        out.push_str(human::advice(&preview.advice).trim_end());
+    }
     out
 }
 

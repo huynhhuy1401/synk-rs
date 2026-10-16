@@ -59,6 +59,14 @@ pub const CODES: &[(&str, &str)] = &[
         "PREFIX_DROPPED_BY_TARGET",
         "The export target doesn't add the model's query/document prefixes",
     ),
+    (
+        "REAL_QUERIES_FEW_DOCUMENTS",
+        "The real searches cover too few documents to decide the verdict",
+    ),
+    (
+        "SYNTHETIC_REAL_DISAGREE",
+        "Generated test queries and real searches reach different verdicts",
+    ),
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +100,44 @@ const MAX_UNMINED_SHARE: f64 = 0.2;
 const MAX_TRUNCATED_SHARE: f64 = 0.05;
 const MAX_QUERIES_PER_CHUNK: u64 = 8;
 const ADD_DOCUMENTS: &str = "synk source add <path> && synk train --dry-run";
+const WRITE_SEARCHES: &str = "synk queries template --out searches.jsonl";
+/// Spread of per-document changes assumed before a run has measured one.
+pub const DEFAULT_DOCUMENT_SD: f64 = 0.10;
+
+/// Before training: warns when the test will be too small for a verdict.
+/// `sd` is the spread of per-document changes from the project's last run,
+/// if any.
+pub fn predicted_power(test_documents: usize, sd: Option<f64>) -> Option<Advice> {
+    let assumed = sd.unwrap_or(DEFAULT_DOCUMENT_SD);
+    let md = crate::stats::min_detectable(test_documents, assumed);
+    if md.is_some_and(|md| md <= crate::train::TYPICAL_GAIN) {
+        return None;
+    }
+    let see = md.map_or_else(
+        || "it can't tell any difference".to_owned(),
+        |md| format!("it could only see a change of about {md:.2} or more"),
+    );
+    Some(Advice {
+        code: "TEST_SET_UNDERPOWERED",
+        severity: Severity::Warning,
+        message: format!(
+            "Only {test_documents} document(s) will be held out for the test, so {see}, and tuning usually brings about {:.2}. The verdict will probably be inconclusive even if tuning helps. Write real searches (synk queries template), add documents, or raise dataset.test_percent.",
+            crate::train::TYPICAL_GAIN
+        ),
+        evidence: json!({
+            "predicted": true,
+            "test_documents": test_documents,
+            "min_detectable_delta": md.map(|m| (m * 1000.0).round() / 1000.0),
+            "assumed_sd": assumed,
+            "sd_from": if sd.is_some() { "last run" } else { "default" },
+        }),
+        action: command(WRITE_SEARCHES).map(|c| Action {
+            command: Some(c),
+            config: None,
+        }),
+        applicability: Applicability::Manual,
+    })
+}
 
 fn config(pairs: &[(&str, Value)]) -> Option<Map<String, Value>> {
     Some(
@@ -245,6 +291,44 @@ pub fn train(
             });
         }
     }
+    if let (Some(real), Some(_)) = (
+        verdict.by_kind.get("real"),
+        verdict.by_kind.get("synthetic"),
+    ) && verdict.query_kind != "real"
+    {
+        let covered = real.test_documents;
+        out.push(Advice {
+            code: "REAL_QUERIES_FEW_DOCUMENTS",
+            severity: Severity::Info,
+            message: format!(
+                "Your {} real searches are about {covered} document(s); they decide the verdict once there are {} or more about {}+ documents, because searches about one document rise and fall together. Write a few about other documents.",
+                real.test_queries,
+                crate::train::MIN_REAL_QUERIES,
+                crate::train::MIN_REAL_DOCUMENTS,
+            ),
+            evidence: json!({"real_queries": real.test_queries, "documents": covered, "min_queries": crate::train::MIN_REAL_QUERIES, "min_documents": crate::train::MIN_REAL_DOCUMENTS}),
+            action: command(WRITE_SEARCHES).map(|c| Action {
+                command: Some(c),
+                config: None,
+            }),
+            applicability: Applicability::Manual,
+        });
+    }
+    if verdict.agreement.as_deref() == Some("disagree") {
+        let kind = |k: &str| verdict.by_kind.get(k).map_or("?", |v| v.outcome.as_str());
+        out.push(Advice {
+            code: "SYNTHETIC_REAL_DISAGREE",
+            severity: Severity::Warning,
+            message: format!(
+                "Generated test queries say {} but your real searches say {}. Real searches are how you'll use the model, so trust them; the generated test may reward the LLM's style of question.",
+                kind("synthetic"),
+                kind("real")
+            ),
+            evidence: json!({"synthetic": kind("synthetic"), "real": kind("real"), "decided_by": verdict.query_kind}),
+            action: None,
+            applicability: Applicability::Review,
+        });
+    }
     let half_width = match (verdict.ci_low, verdict.ci_high) {
         (Some(lo), Some(hi)) => Some((hi - lo) / 2.0),
         _ => None,
@@ -254,7 +338,7 @@ pub fn train(
             code: "TEST_SET_UNDERPOWERED",
             severity: Severity::Warning,
             message: format!(
-                "The test has only {} documents, too few to see changes in search quality under {}; the verdict can only see large differences. Add documents.",
+                "The test has only {} documents, too few to see changes in search quality under {}; the verdict can only see large differences. Add documents, or write real searches (synk queries template).",
                 verdict.test_documents,
                 verdict.min_detectable_delta.map_or("any size".to_owned(), |d| format!("{d:.2}")),
             ),
@@ -412,6 +496,11 @@ mod tests {
             by_lang: Default::default(),
             query_kind: "synthetic".into(),
             by_kind: Default::default(),
+            reason: None,
+            method: "paired_t".into(),
+            permutation_p: None,
+            permutation_exact: None,
+            agreement: None,
         }
     }
 

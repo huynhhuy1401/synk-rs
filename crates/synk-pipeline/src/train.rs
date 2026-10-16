@@ -86,6 +86,16 @@ const MAX_AUTO_EPOCHS: u64 = 5;
 const FILTER_K: u32 = 20;
 /// The verdict is decided on real queries once there are this many.
 pub const MIN_REAL_QUERIES: usize = 30;
+/// ...and they must cover at least this many documents: queries about one
+/// document rise and fall together, so 30 about 2 documents are 2 data
+/// points.
+pub const MIN_REAL_DOCUMENTS: u64 = 10;
+/// A typical gain from tuning on one's own documents (nDCG@10). A test that
+/// can't see a change this size is too small to give a verdict.
+pub const TYPICAL_GAIN: f64 = 0.05;
+/// Units for which an exact sign-flip test can't reach p < 0.05 (its
+/// smallest p is 2/2^n).
+const SIGN_FLIP_BLIND_UP_TO: u64 = 5;
 
 pub struct Options {
     pub resume: bool,
@@ -142,6 +152,30 @@ pub struct Verdict {
     /// The verdict on each kind of query, when real queries exist.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub by_kind: BTreeMap<String, Verdict>,
+    /// Why there's no clear change: `no_difference` (the test could have
+    /// seen a typical gain and didn't) or `too_few_test_documents` (it
+    /// couldn't: the verdict is inconclusive). Only with `no_clear_change`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The decision rule: `paired_t` (a paired t-test on per-document
+    /// changes).
+    #[serde(default = "paired_t")]
+    pub method: String,
+    /// A cross-check: the two-sided sign-flip p-value on the same
+    /// per-document changes, which assumes nothing about their shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permutation_p: Option<f64>,
+    /// Whether `permutation_p` enumerated every flip (up to 20 documents).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permutation_exact: Option<bool>,
+    /// With real queries: whether the synthetic and the real verdict have
+    /// the same outcome (`agree` or `disagree`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agreement: Option<String>,
+}
+
+fn paired_t() -> String {
+    "paired_t".to_owned()
 }
 
 fn synthetic() -> String {
@@ -620,17 +654,28 @@ fn decide(rows: &[QueryRanks], names: &Names) -> Verdict {
     }
     let mut real_v = judge_with_langs(&real, names, "real queries");
     real_v.query_kind = "real".to_owned();
-    let mut chosen = if real.len() >= MIN_REAL_QUERIES && real_v.test_documents >= 2 {
+    let mut chosen = if real.len() >= MIN_REAL_QUERIES
+        && real_v.test_documents >= MIN_REAL_DOCUMENTS
+    {
         real_v.clone()
     } else {
         let mut v = synthetic_v.clone();
         let _ = write!(
             v.message,
-            " {} real queries are reported separately; {MIN_REAL_QUERIES} or more decide the verdict.",
-            real.len()
+            " {} real queries about {} documents are reported separately; {MIN_REAL_QUERIES} or more about {MIN_REAL_DOCUMENTS}+ documents decide the verdict.",
+            real.len(),
+            real_v.test_documents
         );
         v
     };
+    chosen.agreement = Some(
+        if synthetic_v.outcome == real_v.outcome {
+            "agree"
+        } else {
+            "disagree"
+        }
+        .to_owned(),
+    );
     synthetic_v.query_kind = "synthetic".to_owned();
     chosen.by_kind = [
         ("synthetic".to_owned(), synthetic_v),
@@ -675,6 +720,7 @@ fn judge(rows: &[&QueryRanks], names: &Names, noun: &str) -> Verdict {
         .map(|(sum, k)| sum / f64::from(*k))
         .collect();
     let test = stats::paired_t(&diffs);
+    let flips = stats::sign_flip_p(&diffs);
     let outcome = match test {
         Some(t) if t.ci_low > 0.0 => "better",
         Some(t) if t.ci_high < 0.0 => "worse",
@@ -707,6 +753,18 @@ fn judge(rows: &[&QueryRanks], names: &Names, noun: &str) -> Verdict {
                     " This test set can only detect changes of about {:.3} or more.",
                     t.min_detectable
                 );
+                if t.min_detectable > TYPICAL_GAIN {
+                    let _ = write!(
+                        message,
+                        " Tuning usually brings about {TYPICAL_GAIN:.2}, so this is inconclusive: add documents, or write real searches (synk queries template)."
+                    );
+                }
+            } else if documents as u64 <= SIGN_FLIP_BLIND_UP_TO {
+                let _ = write!(
+                    message,
+                    " With only {documents} test documents, a test that assumes nothing about the data can't be sure (its smallest p is {:.3}); this rests on the t-test's assumption that changes are roughly normal.",
+                    2.0 / f64::from(1u32 << documents)
+                );
             }
         }
         None => {
@@ -733,6 +791,17 @@ fn judge(rows: &[&QueryRanks], names: &Names, noun: &str) -> Verdict {
         by_lang: BTreeMap::new(),
         query_kind: synthetic(),
         by_kind: BTreeMap::new(),
+        reason: (outcome == "no_clear_change").then(|| {
+            match test {
+                Some(t) if t.min_detectable <= TYPICAL_GAIN => "no_difference",
+                _ => "too_few_test_documents",
+            }
+            .to_owned()
+        }),
+        method: paired_t(),
+        permutation_p: flips.map(|(p, _)| round4(p)),
+        permutation_exact: flips.map(|(_, exact)| exact),
+        agreement: None,
     }
 }
 
@@ -775,6 +844,11 @@ fn legacy_verdict(eval: &Value) -> Verdict {
         by_lang: BTreeMap::new(),
         query_kind: synthetic(),
         by_kind: BTreeMap::new(),
+        reason: None,
+        method: "margin".to_owned(),
+        permutation_p: None,
+        permutation_exact: None,
+        agreement: None,
     }
 }
 
@@ -888,18 +962,52 @@ mod tests {
         assert_eq!(few.query_kind, "synthetic");
         assert!(
             few.message
-                .contains("5 real queries are reported separately")
+                .contains("5 real queries about 5 documents are reported separately"),
+            "{}",
+            few.message
         );
         assert_eq!(few.by_kind["real"].outcome, "better");
+        // Synthetic says no change, real says better.
+        assert_eq!(few.agreement.as_deref(), Some("disagree"));
 
+        // 40 queries, but about 8 documents only: still reported, not deciding.
         rows.truncate(6);
         rows.extend(real(40, 8));
+        assert_eq!(verdict(&rows).query_kind, "synthetic");
+
+        rows.truncate(6);
+        rows.extend(real(40, 10));
         let many = verdict(&rows);
         assert_eq!(
             (many.query_kind.as_str(), many.outcome.as_str()),
             ("real", "better")
         );
         assert!(many.message.contains("real queries"));
+    }
+
+    #[test]
+    fn no_clear_change_says_whether_the_test_could_see_a_gain() {
+        // Two documents: the test can't see a typical gain: inconclusive.
+        let tiny = verdict(&[row("d0", "en", 2, 1), row("d1", "en", 1, 2)]);
+        assert_eq!(tiny.outcome, "no_clear_change");
+        assert_eq!(tiny.reason.as_deref(), Some("too_few_test_documents"));
+        assert!(tiny.message.contains("inconclusive"), "{}", tiny.message);
+        // Many documents with tiny, mixed changes: it could have seen one.
+        let big: Vec<_> = (0..200)
+            .map(|d| {
+                let t = if d % 2 == 0 { 1 } else { 2 };
+                row(&format!("d{d}"), "en", 1, if d % 50 == 0 { t } else { 1 })
+            })
+            .collect();
+        let v = verdict(&big);
+        assert_eq!(v.outcome, "no_clear_change", "{}", v.message);
+        assert_eq!(v.reason.as_deref(), Some("no_difference"), "{}", v.message);
+        // Better and worse have no reason; the sign-flip p is reported.
+        let better: Vec<_> = (0..4).map(|d| row(&format!("d{d}"), "en", 3, 1)).collect();
+        let v = verdict(&better);
+        assert_eq!(v.reason, None);
+        assert_eq!(v.permutation_exact, Some(true));
+        assert!(v.permutation_p.unwrap() > 0.05);
     }
 
     #[test]

@@ -50,6 +50,81 @@ pub fn paired_t(diffs: &[f64]) -> Option<PairedTest> {
     })
 }
 
+/// The smallest true mean change a paired t-test on `n` units, whose
+/// changes spread by `sd`, detects 80% of the time. `None` below 2 units,
+/// where the test can't decide anything.
+pub fn min_detectable(n: usize, sd: f64) -> Option<f64> {
+    if n < 2 {
+        return None;
+    }
+    let df = (n - 1) as f64;
+    Some((t_quantile(0.05, df) + t_quantile(0.4, df)) * sd / (n as f64).sqrt())
+}
+
+/// The spread of per-unit changes behind a measured `min_detectable`.
+pub fn sd_from_min_detectable(n: usize, min_detectable: f64) -> Option<f64> {
+    let per_sd = min_detectable_per_sd(n)?;
+    (per_sd > 0.0).then(|| min_detectable / per_sd)
+}
+
+fn min_detectable_per_sd(n: usize) -> Option<f64> {
+    min_detectable(n, 1.0)
+}
+
+/// Units up to which the sign-flip test enumerates every flip exactly.
+const EXACT_FLIPS_UP_TO: usize = 20;
+/// Random flips above that.
+const RANDOM_FLIPS: u32 = 20_000;
+
+/// Two-sided sign-flip (randomization) p-value for "the mean change is 0":
+/// the share of the 2^n ways of flipping each change's sign whose mean is
+/// at least as far from 0 as the observed one. It assumes nothing about the
+/// shape of the changes, which matters with few units; with n units its
+/// smallest possible value is 2/2^n (0.0625 at n = 5). Exact up to
+/// [`EXACT_FLIPS_UP_TO`] units, else a fixed-seed sample. Returns the
+/// p-value and whether it is exact; `None` without any units.
+pub fn sign_flip_p(diffs: &[f64]) -> Option<(f64, bool)> {
+    let n = diffs.len();
+    if n == 0 {
+        return None;
+    }
+    let observed = diffs.iter().sum::<f64>().abs();
+    // Rounding must not make the observed arrangement look more extreme
+    // than itself.
+    let at_least = |sum: f64| sum.abs() >= observed - 1e-12;
+    if n <= EXACT_FLIPS_UP_TO {
+        let total = 1u64 << n;
+        let extreme = (0..total)
+            .filter(|mask| {
+                let sum: f64 = diffs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| if mask >> i & 1 == 1 { -d } else { *d })
+                    .sum();
+                at_least(sum)
+            })
+            .count();
+        return Some((extreme as f64 / total as f64, true));
+    }
+    // xorshift64*, fixed seed: the same data always gives the same p.
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut extreme = 1; // the observed arrangement counts
+    for _ in 0..RANDOM_FLIPS {
+        let mut sum = 0.0;
+        for d in diffs {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let bit = state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 63;
+            sum += if bit == 1 { -d } else { *d };
+        }
+        if at_least(sum) {
+            extreme += 1;
+        }
+    }
+    Some((f64::from(extreme) / f64::from(RANDOM_FLIPS + 1), false))
+}
+
 /// Two-sided p-value of Student's t with `df` degrees of freedom.
 pub fn two_sided_p(t: f64, df: f64) -> f64 {
     let x = df / (df + t * t);
@@ -145,6 +220,38 @@ fn ln_gamma(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_flips_are_exact_for_small_tests() {
+        // Five documents that all improve: the most extreme of 32
+        // arrangements, twice (both signs), so p = 2/32 = 0.0625, never
+        // below 0.05.
+        let (p, exact) = sign_flip_p(&[0.1, 0.2, 0.15, 0.05, 0.3]).unwrap();
+        assert!(exact);
+        assert!((p - 0.0625).abs() < 1e-12, "{p}");
+        // Eight: 2/256.
+        let (p, _) = sign_flip_p(&[0.1; 8]).unwrap();
+        assert!((p - 2.0 / 256.0).abs() < 1e-12, "{p}");
+        // Changes that cancel out: nothing to see.
+        let (p, _) = sign_flip_p(&[0.1, -0.1, 0.2, -0.2]).unwrap();
+        assert!((p - 1.0).abs() < 1e-12, "{p}");
+        // Many documents: sampled, and agrees with the t-test.
+        let many: Vec<f64> = (0..40).map(|i| 0.05 + f64::from(i % 5) * 0.01).collect();
+        let (p, exact) = sign_flip_p(&many).unwrap();
+        assert!(!exact && p < 0.001, "{p}");
+        assert_eq!(sign_flip_p(&[]), None);
+    }
+
+    #[test]
+    fn predicted_power_matches_the_measured_formula() {
+        // 30 documents spreading by 0.10 see about +0.053.
+        let md = min_detectable(30, 0.10).unwrap();
+        assert!((md - 0.053).abs() < 0.002, "{md}");
+        assert!(min_detectable(5, 0.10).unwrap() > 0.15);
+        assert_eq!(min_detectable(1, 0.10), None);
+        let sd = sd_from_min_detectable(30, md).unwrap();
+        assert!((sd - 0.10).abs() < 1e-9);
+    }
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol

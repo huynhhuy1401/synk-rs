@@ -888,6 +888,53 @@ fn a_killed_run_reads_as_interrupted_at_once_and_continues() {
 }
 
 #[test]
+fn the_dry_run_warns_when_the_test_is_too_small_for_a_verdict() {
+    let dir = synced_project();
+    let root = dir.path();
+    with_generator_and_tiny_model(root, &fake_llm());
+    let preview = synk(root, &["train", "--dry-run"]);
+    let dataset = preview["data"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step"] == "dataset")
+        .unwrap()
+        .clone();
+    let tests = dataset["detail"]["test_documents"].as_u64().unwrap();
+    assert!(tests >= 1, "{dataset}");
+    assert!(dataset["detail"]["train_documents"].as_u64().unwrap() >= 1);
+    let advice = preview["data"]["advice"].as_array().unwrap();
+    let warning = advice
+        .iter()
+        .find(|a| a["code"] == "TEST_SET_UNDERPOWERED")
+        .unwrap_or_else(|| panic!("no warning: {preview}"));
+    assert_eq!(warning["evidence"]["predicted"], true);
+    assert_eq!(warning["evidence"]["test_documents"], tests);
+    assert_eq!(
+        warning["action"]["command"],
+        "synk queries template --out searches.jsonl"
+    );
+
+    // After the run, the verdict says why there's no clear change.
+    let trained = synk(root, &["train"]);
+    let verdict = &trained["data"]["verdict"];
+    assert_eq!(verdict["method"], "paired_t", "{verdict}");
+    if verdict["outcome"] == "no_clear_change" {
+        assert_eq!(verdict["reason"], "too_few_test_documents", "{verdict}");
+    }
+
+    // test_percent takes "auto" (the default) or a number.
+    assert_eq!(
+        synk(root, &["config", "set", "dataset.test_percent", "50"])["ok"],
+        true
+    );
+    assert_eq!(
+        synk(root, &["config", "set", "dataset.test_percent", "auto"])["ok"],
+        true
+    );
+}
+
+#[test]
 fn a_failing_generator_passes_on_the_servers_message() {
     let dir = synced_project();
     let root = dir.path();

@@ -269,6 +269,10 @@ pub struct Preview {
     /// exist already.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_key: Option<String>,
+    /// Advice known before anything runs, e.g. a test too small for a
+    /// verdict (`TEST_SET_UNDERPOWERED` with `evidence.predicted`).
+    #[serde(default, skip_deserializing)]
+    pub advice: Vec<crate::advice::Advice>,
 }
 
 impl Preview {
@@ -698,6 +702,7 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
     let mut dataset_plan: Option<(Action, Vec<String>, Value, u64)> = None;
     let mut dataset_key = None;
     let mut generator_error = None;
+    let mut advice = Vec::new();
     if needed.contains(&Step::Dataset) {
         // The dataset as it will be after the sync: sync inside a savepoint,
         // look, and roll back. Nothing is saved.
@@ -738,6 +743,8 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
                     "chunks": p["chunks"],
                     "train_chunks": p["train_chunks"],
                     "test_chunks": p["test_chunks"],
+                    "train_documents": p["train_documents"],
+                    "test_documents": p["test_documents"],
                     "llm_calls": calls,
                     "chunks_with_queries": p["cached_chunks"],
                     "generator": ws.cfg.generator.model,
@@ -756,6 +763,12 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
                     )
                 };
                 let _ = generator_key;
+                if let Some(n) = p["test_documents"].as_u64() {
+                    advice.extend(crate::advice::predicted_power(
+                        n as usize,
+                        last_document_sd(&artifacts),
+                    ));
+                }
                 dataset_key = Some(key);
                 let calls = if action == Action::Cached { 0 } else { calls };
                 dataset_plan = Some((action, why, detail, calls));
@@ -1067,8 +1080,18 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
         fetch,
         dataset_key,
         run_key,
+        advice,
     };
     Ok(preview)
+}
+
+/// The spread of per-document changes measured by the project's latest
+/// evaluation, to predict the next test's power.
+fn last_document_sd(artifacts: &Artifacts) -> Option<f64> {
+    let eval = artifacts.latest(train::EVAL_KIND).ok()??;
+    let v = train::eval_verdict(&eval);
+    let n = usize::try_from(v.test_documents).ok()?;
+    crate::stats::sd_from_min_detectable(n, v.min_detectable_delta?)
 }
 
 fn p_steps(p: &Value) -> u64 {
