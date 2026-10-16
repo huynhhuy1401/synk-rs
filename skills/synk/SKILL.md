@@ -7,8 +7,9 @@ description: Fine-tune a small embedding (search) model on a user's own document
 
 synk is a CLI. Every command takes `--json` and prints exactly one object on
 stdout: `{"v": 1, "ok": true, "data": ...}` or `{"v": 1, "ok": false, "error": ...}`.
-Exit code is 0 exactly when `ok` is true (2 for usage errors). Parse JSON,
-never the human text. Progress and heartbeats go to stderr.
+Exit code is 0 exactly when `ok` is true (2 for usage errors, 130 when Ctrl-C
+stopped it). Parse JSON, never the human text. Progress and heartbeats go to
+stderr.
 
 ## The loop
 
@@ -40,6 +41,11 @@ synk export <run> --out ./model --json      # when data.verdict.outcome is "bett
 - `train` blocks until done (minutes to hours). If your shell times out or
   backgrounds it: `synk wait --timeout 9m --json` (repeat while `data.done`
   is false), `synk logs --after <seq>`, `synk cancel`.
+- **Check the dry run's `data.advice` and `data.disk` before training.**
+  `TEST_SET_UNDERPOWERED` with `evidence.predicted: true` means the test will
+  have too few documents for a verdict: tell the user before spending hours,
+  and suggest real searches (below) or more documents. An `INSUFFICIENT_DISK`
+  blocker lists, per drive, what the run would write and what's free.
 - Retrying is safe: `synk train` with nothing changed returns the same run
   (`data.reused: true`); an interrupted or cancelled run continues
   (`data.op.attempt` + 1). `synk train run:3` continues run 3 with the
@@ -51,6 +57,16 @@ synk export <run> --out ./model --json      # when data.verdict.outcome is "bett
   that isn't `better` is a normal result, not an error. Explain it to the
   user with `data.advice` (each has `code`, `message`, `applicability`, and
   often `action`).
+- A `no_clear_change` has `verdict.reason`: `no_difference` (the test could
+  have seen a typical gain and didn't: tuning likely didn't help) or
+  `too_few_test_documents` (inconclusive: more documents or real searches
+  are needed before anything can be said). Don't present the second as
+  "tuning doesn't work".
+- **Real searches are the strongest test.** `synk queries template --out
+  searches.jsonl` lists documents with an empty search each; the *user*
+  fills them in, without opening the documents (don't write them yourself:
+  that tests the model on your style, not theirs). Then `synk queries import
+  searches.jsonl`. 30+ searches about 10+ documents decide the verdict.
 - `synk run list --json` lists every run with its state, verdict and the
   settings that differ from synk.toml (`differs`).
 - `synk run inspect <run> --json` shows the queries that improved or got worse,
@@ -81,9 +97,12 @@ command may succeed later. `error.next`, when present, runs as is.
 
 ## Exporting
 
-- `--format st` (default): a sentence-transformers folder. Use the model's
-  prompts: `encode(texts, prompt_name="query")` for searches,
-  `prompt_name="document"` for documents.
+- `--format st` (default): a sentence-transformers folder.
+- `data.usage` has copy-paste setup that keeps the model's query/document
+  prefixes: `sentence_transformers`, `llamaindex`, `langchain`,
+  `open_webui_env`, and for GGUF `ollama_api` and `anythingllm`. Use them;
+  an app without the prefixes searches worse than synk measured. Remind the
+  user to re-index (`usage.reindex`).
 - `--format onnx`: for ONNX Runtime.
 - `--format gguf --ollama NAME`: creates NAME in the local Ollama, for apps
   like Open WebUI and AnythingLLM. Ollama doesn't add the query/document

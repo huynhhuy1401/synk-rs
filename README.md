@@ -84,7 +84,9 @@ exactly those names, at those versions), then `synk train`.
 Every `synk train` is a **run** with a short ID, `run:1-e5-small`. Running it
 again with nothing changed returns the same run; an interrupted run continues
 where it stopped. `synk wait`, `synk logs` and `synk cancel` act on whatever is
-running.
+running. Ctrl-C stops a run at the next safe point (the trainer saves a
+checkpoint first); a second Ctrl-C stops it at once. Either way `synk train`
+continues it later.
 
 `synk status` says where the project stands and what to do next, and checks
 what synk needs: the sources exist, the trainer is installed, the LLM server
@@ -339,7 +341,8 @@ With `--json`, a heartbeat line goes to stderr every 30 s so shells that kill
 silent commands don't.
 
 **Progress.** `--progress jsonl` writes events to stderr:
-`{"v": 1, "event": "op" | "progress" | "log" | "step" | "heartbeat", ...}`.
+`{"v": 1, "event": "op" | "progress" | "log" | "step" | "heartbeat" | "interrupt", ...}`
+(`interrupt` carries `count`: 1 = stopping at a safe point, 2 = stopping now).
 
 **Verdict** (`data.verdict`): `outcome` is `better`, `worse` or
 `no_clear_change`. A `no_clear_change` has a `reason`: `no_difference` (the
@@ -382,7 +385,7 @@ a better result: `code`, `severity`, `message`, `evidence`, `action`
 | `IO` / `STORE` | Filesystem or database failure |
 | `CONSENT_REQUIRED` | `train`/`dataset` would download or send without `--yes`; `details.fetch` lists the names for `synk fetch` |
 | `JOB_RUNNING` / `JOB_NOT_FOUND` | A run, dataset build or fetch is already running in this project; nothing matches that ID |
-| `CANCELLED` | It was cancelled; `synk train <run>` continues it |
+| `CANCELLED` | It was cancelled (`synk cancel`, or Ctrl-C: exit code 130, `details.how` is `safe_stop` or `immediate`); `synk train <run>` continues it |
 | `RUN_NAME_TAKEN` | `--name` is already used by another run |
 | `RUN_NOT_RESUMABLE` | `train <run>` on a run without saved settings to continue with |
 | `SIDECAR_NOT_FOUND` / `SIDECAR_PROTOCOL` / `SIDECAR_FAILED` / `SETUP_FAILED` | Trainer environment problems |
