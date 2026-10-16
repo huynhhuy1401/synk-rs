@@ -170,7 +170,7 @@ impl Store {
                     MIGRATIONS.len()
                 ),
             )
-            .with_next("Upgrade synk"));
+            .with_hint("install a newer synk"));
         }
         let tx = conn.transaction().map_err(store_err)?;
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(applied) {

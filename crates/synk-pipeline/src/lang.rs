@@ -94,7 +94,7 @@ pub fn parse(s: &str) -> Result<Lang> {
                 ErrorCode::ConfigInvalid,
                 format!("unknown language `{s}` in [generator] languages"),
             )
-            .with_next("Use an ISO 639-1 code such as \"vi\" or \"en\"")
+            .with_hint("use an ISO 639-1 code such as \"vi\" or \"en\"")
         })
 }
 

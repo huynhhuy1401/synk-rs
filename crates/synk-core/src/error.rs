@@ -302,6 +302,11 @@ impl SynkError {
     /// first action.
     pub fn with_next(mut self, next: impl Into<String>) -> Self {
         let next = next.into();
+        // Prose or a placeholder belongs in `with_hint` / `with_action`.
+        debug_assert!(
+            next.starts_with("synk ") && !next.contains('<'),
+            "`next` must be a runnable synk command, got {next:?}"
+        );
         self.actions.insert(
             0,
             ErrorAction::run(&next, Applicability::Machine, "the most likely fix"),

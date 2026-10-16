@@ -163,9 +163,11 @@ impl Connector for FsConnector {
                     self.root.display()
                 ),
             )
-            .with_next(format!(
-                "Restore the path, or run: synk source remove {}",
-                self.name
+            .with_hint("restore the path, or stop syncing it")
+            .with_action(synk_core::ErrorAction::run(
+                &format!("synk source remove {}", self.name),
+                synk_core::Applicability::Review,
+                "stop syncing this source (its documents are kept as they were)",
             ))
         })?;
 

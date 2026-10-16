@@ -76,8 +76,8 @@ pub fn parse_import(text: &str, docs: &[Document]) -> Result<Parsed> {
         if problems.len() > MAX_REPORTED {
             let _ = write!(message, "\n  ...");
         }
-        return Err(SynkError::new(ErrorCode::QueriesInvalid, message).with_next(
-            "Fix those lines: each needs \"query\" and \"doc\" (a document ID) and/or \"text\" (a passage that answers it)",
+        return Err(SynkError::new(ErrorCode::QueriesInvalid, message).with_hint(
+            "fix those lines: each needs \"query\" and \"doc\" (a document ID) and/or \"text\" (a passage that answers it)",
         ));
     }
     if rows.is_empty() {

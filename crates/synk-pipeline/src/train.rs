@@ -906,10 +906,10 @@ pub fn export_folder(model_dir: &Path, out: &Path, readme: &str) -> Result<()> {
             .is_some()
     {
         return Err(SynkError::new(
-            ErrorCode::InvalidArgs,
+            ErrorCode::ExportExists,
             format!("{} already exists and is not empty", out.display()),
         )
-        .with_next("Pick another --out directory"));
+        .with_hint("pick another --out directory, or add --force to replace it"));
     }
     copy_dir(model_dir, out)?;
     let path = out.join("README.md");

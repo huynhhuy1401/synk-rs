@@ -33,8 +33,12 @@ impl TokenCounter {
     pub fn load(model: &ModelSpec) -> Result<Self> {
         let path = locate(model)?;
         let bytes = fs::read(&path).map_err(|e| SynkError::io(path.display(), e))?;
-        Self::from_bytes(&bytes, model.document_prompt.as_deref().unwrap_or(""))
-            .map_err(|e| e.with_next(format!("Delete {} and try again", path.display())))
+        Self::from_bytes(&bytes, model.document_prompt.as_deref().unwrap_or("")).map_err(|e| {
+            e.with_hint(format!(
+                "delete {} and run the same command again",
+                path.display()
+            ))
+        })
     }
 
     pub fn from_bytes(bytes: &[u8], document_prompt: &str) -> Result<Self> {
@@ -129,7 +133,7 @@ fn download(repo: &str, revision: &str, dest: &Path) -> Result<()> {
             ErrorCode::ModelNotFound,
             format!("could not download the tokenizer of {repo}: {why}"),
         )
-        .with_next("Check your network connection and run the command again")
+        .with_hint("check your network connection and run the same command again")
     };
     if std::env::var("HF_HUB_OFFLINE").is_ok_and(|v| v == "1") {
         return Err(fail("HF_HUB_OFFLINE is set".to_owned()));

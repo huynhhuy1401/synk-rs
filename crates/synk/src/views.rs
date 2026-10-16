@@ -142,7 +142,7 @@ pub fn list_queries(project: &Project) -> Result<Output> {
         let _ = write!(human, "\n  {:<40} -> {}", q.query, q.doc);
     }
     let next = if queries.is_empty() {
-        "synk queries import <file.jsonl>"
+        "synk queries template --out searches.jsonl"
     } else {
         "synk train --dry-run"
     };
