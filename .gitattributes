@@ -1,0 +1,3 @@
+# LF everywhere, also in Windows checkouts: include_str! embeds files (the
+# agent skill, the sidecar script) byte for byte.
+* text=auto eol=lf

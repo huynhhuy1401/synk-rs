@@ -1,0 +1,6 @@
+# `cargo deny check advisories` (CI). Any known vulnerability fails the build.
+[advisories]
+# "Unmaintained" fails only for crates synk depends on directly: for one
+# deep in the tree (paste via tokenizers, ttf-parser via lopdf) there is no
+# upgrade we can make.
+unmaintained = "workspace"
