@@ -332,15 +332,23 @@ pub fn prepare(
     for doc in &docs {
         for text in chunking.split(&doc.text) {
             let heading = heading_path(&doc.text, &text);
+            let detected = lang::detect(&text);
+            // Everything the prompt sees about the chunk. Its language too,
+            // but only where it differs from what synk detected before the
+            // Vietnamese rule, so other chunks keep their cached queries.
+            let mut seen = format!("{}\0{heading}\0{text}", doc.title);
+            if detected != lang::detect_general(&text) {
+                seen.push('\0');
+                seen.push_str(detected.map_or("", lang::code));
+            }
             candidates.push(Chunk {
                 id: short_hash(&format!("{}\0{text}", doc.id)),
                 doc: doc.id.clone(),
                 title: doc.title.clone(),
-                // Everything the prompt sees about the chunk.
-                hash: short_hash(&format!("{}\0{heading}\0{text}", doc.title)),
+                hash: short_hash(&seen),
                 heading,
                 split: splits[&doc.id],
-                lang: lang::detect(&text),
+                lang: detected,
                 truncated: chunking.truncated(&text),
                 text,
             });
@@ -367,6 +375,8 @@ pub fn prepare(
     let per_chunk = queries_per_chunk(queries_setting, train_chunks);
     let params = json!({
         "chunking": chunking.describe(),
+        // How documents were turned into text (NFC since 2).
+        "reader": synk_connectors::readers::READER_VERSION,
         "test_percent": cfg.test_percent,
         "max_chunks": cfg.max_chunks,
         "generator": generator.key(),

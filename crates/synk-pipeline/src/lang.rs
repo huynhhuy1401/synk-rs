@@ -108,9 +108,45 @@ pub fn code(lang: Lang) -> &'static str {
 
 /// The language of a text, if it can be told with reasonable confidence.
 pub fn detect(text: &str) -> Option<Lang> {
+    if vietnamese_letters(text) {
+        return Some(Lang::Vie);
+    }
+    detect_general(text)
+}
+
+/// whatlang alone: what `detect` returned before the Vietnamese rule.
+pub fn detect_general(text: &str) -> Option<Lang> {
     whatlang::detect(text)
         .filter(|info| info.confidence() >= 0.5)
         .map(|info| info.lang())
+}
+
+/// Share of letters that only Vietnamese uses, above which a text is
+/// Vietnamese. Notes that mix Vietnamese with English terms
+/// ("deploy lên server bị lỗi timeout") fool general detectors, which
+/// called such lines French or Latvian; Vietnamese's own letters don't.
+const VIETNAMESE_LETTER_SHARE: f64 = 0.02;
+
+/// Whether at least [`VIETNAMESE_LETTER_SHARE`] of the letters are ones
+/// only Vietnamese uses: ă, đ, ơ, ư, ĩ, ũ, and the stacked tone-mark
+/// vowels (U+1EA0..U+1EF9), counted after NFC so decomposed text counts
+/// too. â, ê, ô and plain accents are shared with French and others.
+fn vietnamese_letters(text: &str) -> bool {
+    use unicode_normalization::UnicodeNormalization;
+    let (mut letters, mut vietnamese) = (0u32, 0u32);
+    for c in text.nfc() {
+        if !c.is_alphabetic() {
+            continue;
+        }
+        letters += 1;
+        let lower = c.to_lowercase().next().unwrap_or(c);
+        if matches!(lower, 'ă' | 'đ' | 'ơ' | 'ư' | 'ĩ' | 'ũ')
+            || ('\u{1EA0}'..='\u{1EF9}').contains(&c)
+        {
+            vietnamese += 1;
+        }
+    }
+    letters > 0 && f64::from(vietnamese) / f64::from(letters) >= VIETNAMESE_LETTER_SHARE
 }
 
 #[cfg(test)]
@@ -124,6 +160,31 @@ mod tests {
         assert_eq!(parse("Vietnamese").unwrap(), Lang::Vie);
         assert_eq!(parse("klingon").unwrap_err().code, ErrorCode::ConfigInvalid);
         assert_eq!(code(Lang::Vie), "vi");
+    }
+
+    #[test]
+    fn mixed_and_decomposed_vietnamese_is_vietnamese() {
+        use unicode_normalization::UnicodeNormalization;
+        for vi in [
+            "Deploy lên server bị lỗi timeout, phải tăng keepalive lên 75s trong nginx.",
+            "Tăng max_connections của PostgreSQL lên 500 khi tải cao",
+            "Sao lưu database chạy lúc 2 giờ sáng",
+        ] {
+            assert_eq!(detect(vi), Some(Lang::Vie), "{vi}");
+        }
+        // Typed or exported as base letters plus combining marks.
+        let decomposed: String = "Tiếng Việt có dấu".nfd().collect();
+        assert_eq!(detect(&decomposed), Some(Lang::Vie));
+        // French and English stay what they are.
+        assert_eq!(
+            detect("Le serveur était très lent après la mise à jour de la base de données."),
+            Some(Lang::Fra)
+        );
+        // Shared accents (é, â, ê, ô) don't make a text Vietnamese.
+        assert_ne!(
+            detect("The café's menu changed after the update to the ordering system."),
+            Some(Lang::Vie)
+        );
     }
 
     #[test]
