@@ -24,6 +24,21 @@ SYNK_E2E_PYTHON=<python with torch + sentence-transformers> cargo test -- --igno
   and installers and publishes a GitHub release. Only tags run it, not PRs.
 - GPUs aren't in CI; test CUDA by hand on a cloud GPU before a release.
 
+## Commits
+
+Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/):
+`<type>(<optional scope>): <summary>`, lowercase, imperative, no period,
+under ~72 characters; details go in the body.
+
+- Types: `feat` (a user-visible feature), `fix` (a bug fix), `docs`,
+  `refactor`, `perf`, `test`, `ci`, `build`, `chore`.
+- Scopes, when they help: `cli`, `pipeline`, `trainer` (the sidecar),
+  `generator`, `store`, `connectors`, `skill`, `ci`, `release`.
+- A breaking change to the `--json` contract or `synk.toml`: `feat!:` or
+  `fix!:`, plus a `BREAKING CHANGE:` footer saying what to do.
+- Examples: `feat(cli): add run list --limit`,
+  `fix(trainer): train on one GPU when several are visible`.
+
 ## Rules
 
 - **The `--json` output is a public API.** Agents parse it. Don't rename or
