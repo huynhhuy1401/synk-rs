@@ -1152,6 +1152,24 @@ fn text_is_normalized_and_an_old_store_is_read_again_once() {
 }
 
 #[test]
+fn the_test_size_warning_comes_before_the_llm_is_there() {
+    // A first run: the LLM isn't reachable yet (nothing listens on port 9),
+    // so the dataset can't be planned, but its test documents are known.
+    let dir = synced_project();
+    let root = dir.path();
+    with_generator_and_tiny_model(root, "http://127.0.0.1:9/v1");
+    let preview = synk(root, &["train", "--dry-run"]);
+    assert!(
+        preview["data"]["advice"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["code"] == "TEST_SET_UNDERPOWERED"),
+        "{preview}"
+    );
+}
+
+#[test]
 fn a_failing_generator_passes_on_the_servers_message() {
     let dir = synced_project();
     let root = dir.path();

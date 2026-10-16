@@ -41,12 +41,30 @@ const EXCLUDE_NEWER: &str = "2026-10-14T00:00:00Z";
 /// above). Installing from one resolves nothing on the user's machine, so
 /// every install is the same, byte for byte.
 const LOCKS: &[(&str, &str)] = &[
-    ("cpu-windows-x86_64", include_str!("../locks/cpu-windows-x86_64.txt")),
-    ("cpu-linux-x86_64", include_str!("../locks/cpu-linux-x86_64.txt")),
-    ("cpu-linux-aarch64", include_str!("../locks/cpu-linux-aarch64.txt")),
-    ("cpu-macos-aarch64", include_str!("../locks/cpu-macos-aarch64.txt")),
-    ("cuda-windows-x86_64", include_str!("../locks/cuda-windows-x86_64.txt")),
-    ("cuda-linux-x86_64", include_str!("../locks/cuda-linux-x86_64.txt")),
+    (
+        "cpu-windows-x86_64",
+        include_str!("../locks/cpu-windows-x86_64.txt"),
+    ),
+    (
+        "cpu-linux-x86_64",
+        include_str!("../locks/cpu-linux-x86_64.txt"),
+    ),
+    (
+        "cpu-linux-aarch64",
+        include_str!("../locks/cpu-linux-aarch64.txt"),
+    ),
+    (
+        "cpu-macos-aarch64",
+        include_str!("../locks/cpu-macos-aarch64.txt"),
+    ),
+    (
+        "cuda-windows-x86_64",
+        include_str!("../locks/cuda-windows-x86_64.txt"),
+    ),
+    (
+        "cuda-linux-x86_64",
+        include_str!("../locks/cuda-linux-x86_64.txt"),
+    ),
 ];
 
 /// The lock file for `backend` on this platform, if synk ships one.
@@ -68,7 +86,10 @@ fn lock_file(backend: Backend) -> Option<&'static str> {
         return None;
     };
     let name = format!("{}-{os}-{arch}", backend.as_str());
-    LOCKS.iter().find(|(n, _)| *n == name).map(|(_, text)| *text)
+    LOCKS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, text)| *text)
 }
 
 /// Where synk keeps environments shared by all projects: `$SYNK_HOME`, or the
@@ -443,7 +464,10 @@ pub fn setup(
     let index = backend.torch_index()?;
     let lock = lock_file(backend);
     let recipe = match lock {
-        Some(text) => format!("{PYTHON_VERSION}|lock|{}", blake3::hash(text.as_bytes()).to_hex()),
+        Some(text) => format!(
+            "{PYTHON_VERSION}|lock|{}",
+            blake3::hash(text.as_bytes()).to_hex()
+        ),
         None => format!(
             "{PYTHON_VERSION}|{TORCH}|{SENTENCE_TRANSFORMERS}|{}|{EXCLUDE_NEWER}|{index:?}",
             EXTRAS.join(",")

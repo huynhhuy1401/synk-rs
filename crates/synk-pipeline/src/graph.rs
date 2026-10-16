@@ -708,15 +708,21 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
     let mut dataset_key = None;
     let mut generator_error = None;
     let mut advice = Vec::new();
+    // Test documents, known from the documents alone: also on a first run,
+    // before the LLM is there to plan the rest of the dataset.
+    let mut test_documents = None;
     if needed.contains(&Step::Dataset) {
         // The dataset as it will be after the sync: sync inside a savepoint,
         // look, and roll back. Nothing is saved.
         let looked = store.dry_run(|store| {
             sync::run(&ws.sources, store)?;
-            let docs = store.live_documents()?.len();
-            if docs < 2 {
+            let live = store.live_documents()?;
+            if live.len() < 2 {
                 return Ok(None);
             }
+            test_documents = dataset::test_document_ids(&live, ws.cfg.dataset.test_percent)
+                .ok()
+                .map(|t| t.len());
             Ok(Some(match dataset_inputs(ws, store, &model, opts.sample) {
                 Err(e) => Err(e),
                 Ok((dataset_cfg, chunking, generator)) => {
@@ -769,16 +775,20 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
                 };
                 let _ = generator_key;
                 if let Some(n) = p["test_documents"].as_u64() {
-                    advice.extend(crate::advice::predicted_power(
-                        n as usize,
-                        last_document_sd(&artifacts),
-                    ));
+                    test_documents = Some(n as usize);
                 }
                 dataset_key = Some(key);
                 let calls = if action == Action::Cached { 0 } else { calls };
                 dataset_plan = Some((action, why, detail, calls));
             }
         }
+    }
+
+    if let Some(n) = test_documents {
+        advice.extend(crate::advice::predicted_power(
+            n,
+            last_document_sd(&artifacts),
+        ));
     }
 
     // generator
