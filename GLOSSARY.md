@@ -56,6 +56,18 @@ The chunks and queries built from a fixed snapshot of documents, divided into
 a train split and a test split by document.
 _Avoid_: corpus (when meaning the whole dataset)
 
+**Test document**:
+A document in the test split: never trained on, used only to test. The
+verdict counts test documents, not test queries, because queries about one
+document rise and fall together.
+_Avoid_: test file, eval doc
+
+**Template** (queries):
+A file listing some documents, each with an empty search for the user to
+fill in without opening the document. Imported, the searches become real
+queries.
+_Avoid_: form, questionnaire
+
 **Query generator**:
 The LLM that writes synthetic queries.
 _Avoid_: teacher, LLM backend
@@ -95,8 +107,21 @@ _Avoid_: experiment, trial
 **Verdict**:
 The outcome of comparing a tuned model with its base model on the test split:
 better, worse, or no clear change. Better or worse only when a statistical
-test says so.
+test says so. Real queries decide it when there are enough of them, spread
+over enough documents.
 _Avoid_: score, result
+
+**Inconclusive**:
+A "no clear change" verdict whose test was too small to see a typical gain:
+too few test documents. Different from "no clear change" after a test big
+enough to see one, which means tuning likely didn't help.
+_Avoid_: failed, unknown
+
+**Smallest detectable change**:
+The true gain in search quality the test would catch 8 times out of 10.
+When it is bigger than what tuning usually brings, the test is too small
+and the verdict will be inconclusive.
+_Avoid_: margin of error, minimum effect
 
 **Advice**:
 A suggestion, with a stable code, for getting a better result, and how safe
