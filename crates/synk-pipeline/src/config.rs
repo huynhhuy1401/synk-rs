@@ -172,8 +172,10 @@ pub struct DatasetConfig {
     /// Deprecated: chunk size in characters. When set, it wins over
     /// `chunk_tokens`.
     pub chunk_chars: Option<usize>,
-    /// Share of documents held out for evaluation, in percent.
-    pub test_percent: u8,
+    /// Share of documents held out for evaluation, in percent. `auto`: 20%,
+    /// or more on small projects so the test has at least 10 documents,
+    /// but never more than half of them.
+    pub test_percent: AutoOr<u8>,
     /// Use at most this many chunks (a deterministic sample). Handy for a
     /// quick first run.
     pub max_chunks: Option<usize>,
@@ -184,7 +186,7 @@ impl Default for DatasetConfig {
         Self {
             chunk_tokens: AutoOr::Auto,
             chunk_chars: None,
-            test_percent: 20,
+            test_percent: AutoOr::Auto,
             max_chunks: None,
         }
     }

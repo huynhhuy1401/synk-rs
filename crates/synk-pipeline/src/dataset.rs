@@ -31,7 +31,14 @@ use crate::tokenizer::TokenCounter;
 
 pub const KIND: &str = "dataset";
 /// Bump when chunking, splitting or the file format changes.
-const KIND_VERSION: u32 = 4;
+// 5: `test_percent = "auto"`, and `--sample` keeps every test document.
+const KIND_VERSION: u32 = 5;
+/// `test_percent = "auto"` holds out at least this many documents...
+const AUTO_MIN_TEST_DOCUMENTS: usize = 10;
+/// ...unless that would be more than this share of them.
+const AUTO_MAX_TEST_PERCENT: usize = 50;
+/// The share `auto` starts from, and the old fixed default.
+const DEFAULT_TEST_PERCENT: u8 = 20;
 pub const FORMAT_VERSION: u32 = 1;
 const MIN_CHARS: usize = 100;
 const MIN_TOKENS: usize = 32;
@@ -187,6 +194,17 @@ impl Prepared {
 
     fn count(&self, split: Split) -> usize {
         self.chunks.iter().filter(|c| c.split == split).count()
+    }
+
+    /// Documents with at least one chunk in `split`. The verdict counts
+    /// test documents, not test queries.
+    fn documents_in(&self, split: Split) -> usize {
+        self.chunks
+            .iter()
+            .filter(|c| c.split == split)
+            .map(|c| c.doc.as_str())
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     fn truncated(&self) -> Option<usize> {
@@ -537,9 +555,11 @@ fn queries_for(
     Ok((Some(out), asked))
 }
 
-/// Takes `max` chunks, keeping the train/test proportions and at least one
-/// chunk of each split. Chunk IDs are hashes, so taking the first N of each
-/// split is a stable random sample.
+/// Takes `max` chunks. The verdict's power comes from the number of test
+/// documents, so every test document keeps at least one chunk (while there
+/// is room), and the test's share of the sample is spread evenly over
+/// them; training chunks fill the rest. Chunk IDs are hashes, so taking the
+/// first chunks is a stable random sample.
 fn sample(chunks: Vec<Chunk>, max: usize) -> Vec<Chunk> {
     if chunks.len() <= max {
         return chunks;
@@ -547,13 +567,39 @@ fn sample(chunks: Vec<Chunk>, max: usize) -> Vec<Chunk> {
     let (test, train): (Vec<Chunk>, Vec<Chunk>) =
         chunks.into_iter().partition(|c| c.split == Split::Test);
     let total = test.len() + train.len();
-    let mut test_n = (max * test.len() + total / 2) / total;
-    if !test.is_empty() && max >= 2 {
-        test_n = test_n.max(1);
+    let mut by_doc: BTreeMap<&str, Vec<&Chunk>> = BTreeMap::new();
+    for c in &test {
+        by_doc.entry(c.doc.as_str()).or_default().push(c);
     }
-    test_n = test_n.min(test.len()).min(max.saturating_sub(1).max(1));
-    let train_n = (max - test_n).min(train.len());
-    let mut out: Vec<Chunk> = test.into_iter().take(test_n).collect();
+    // The test's proportional share, but at least one chunk per test
+    // document, and never more than half the sample: training needs
+    // examples too.
+    let share = (max * test.len() + total / 2) / total;
+    let budget = share
+        .max(by_doc.len())
+        .min(test.len())
+        .min((max / 2).max(1));
+    let mut keep: HashSet<&str> = HashSet::new();
+    let mut taken = 0;
+    for round in 0.. {
+        let mut added = false;
+        for chunks in by_doc.values() {
+            if taken == budget {
+                break;
+            }
+            if let Some(c) = chunks.get(round) {
+                keep.insert(c.id.as_str());
+                taken += 1;
+                added = true;
+            }
+        }
+        if taken == budget || !added {
+            break;
+        }
+    }
+    let keep: HashSet<String> = keep.into_iter().map(str::to_owned).collect();
+    let train_n = (max - taken).min(train.len());
+    let mut out: Vec<Chunk> = test.into_iter().filter(|c| keep.contains(&c.id)).collect();
     out.extend(train.into_iter().take(train_n));
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
@@ -603,6 +649,8 @@ pub fn plan(
         "chunks": prepared.chunks.len(),
         "train_chunks": train_chunks,
         "test_chunks": prepared.count(Split::Test),
+        "train_documents": prepared.documents_in(Split::Train),
+        "test_documents": prepared.documents_in(Split::Test),
         "truncated_chunks": prepared.truncated(),
         "cached_chunks": prepared.chunks.len() - uncached.len() + timings.len(),
         "llm_calls": llm_calls,
@@ -746,7 +794,7 @@ pub fn build(
 /// was seen in training. The split hashes the document's path within its
 /// source rather than its ID, which embeds the source's name: renaming a
 /// source must not reshuffle the split and leak test data into training.
-fn split_documents(docs: &[Document], test_percent: u8) -> Result<BTreeMap<String, Split>> {
+fn split_documents(docs: &[Document], test_percent: AutoOr<u8>) -> Result<BTreeMap<String, Split>> {
     if docs.len() < 2 {
         return Err(SynkError::new(
             ErrorCode::DatasetTooSmall,
@@ -758,7 +806,8 @@ fn split_documents(docs: &[Document], test_percent: u8) -> Result<BTreeMap<Strin
         let hash = blake3::hash(doc.rel_path.as_bytes());
         u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes")) % 10_000
     };
-    let threshold = u64::from(test_percent.min(100)) * 100;
+    let percent = test_percent.value().unwrap_or(DEFAULT_TEST_PERCENT);
+    let threshold = u64::from(percent.min(100)) * 100;
     let mut splits: BTreeMap<String, Split> = docs
         .iter()
         .map(|d| {
@@ -770,6 +819,20 @@ fn split_documents(docs: &[Document], test_percent: u8) -> Result<BTreeMap<Strin
             (d.id.clone(), split)
         })
         .collect();
+    // `auto` on a small project: top up the test with the next documents in
+    // the same hash order, so it reaches AUTO_MIN_TEST_DOCUMENTS (at most
+    // half). With enough documents this is exactly the 20% split.
+    if test_percent.is_auto() {
+        let tests = splits.values().filter(|s| **s == Split::Test).count();
+        let want = AUTO_MIN_TEST_DOCUMENTS
+            .min(docs.len() * AUTO_MAX_TEST_PERCENT / 100)
+            .max(tests);
+        let mut order: Vec<&Document> = docs.iter().collect();
+        order.sort_by(|a, b| bucket(a).cmp(&bucket(b)).then(a.rel_path.cmp(&b.rel_path)));
+        for d in order.into_iter().take(want) {
+            splits.insert(d.id.clone(), Split::Test);
+        }
+    }
     // Small projects can land entirely on one side; move the document
     // closest to the threshold so both splits exist.
     let tests = splits.values().filter(|s| **s == Split::Test).count();
@@ -1173,21 +1236,110 @@ mod tests {
             },
         };
         for percent in [0, 100] {
-            let splits = split_documents(&[doc("a", "x.md"), doc("a", "y.md")], percent).unwrap();
+            let splits = split_documents(
+                &[doc("a", "x.md"), doc("a", "y.md")],
+                AutoOr::Value(percent),
+            )
+            .unwrap();
             assert!(splits.values().any(|s| *s == Split::Test));
             assert!(splits.values().any(|s| *s == Split::Train));
         }
         let docs_a: Vec<_> = (0..20).map(|i| doc("a", &format!("{i}.md"))).collect();
         let docs_b: Vec<_> = (0..20).map(|i| doc("b", &format!("{i}.md"))).collect();
-        let a: Vec<_> = split_documents(&docs_a, 20)
+        let a: Vec<_> = split_documents(&docs_a, AutoOr::Value(20))
             .unwrap()
             .into_values()
             .collect();
-        let b: Vec<_> = split_documents(&docs_b, 20)
+        let b: Vec<_> = split_documents(&docs_b, AutoOr::Value(20))
             .unwrap()
             .into_values()
             .collect();
         assert_eq!(a, b);
+    }
+
+    fn docs(n: usize) -> Vec<Document> {
+        (0..n)
+            .map(|i| Document {
+                id: format!("s/{i}.md"),
+                source: "s".into(),
+                rel_path: format!("{i}.md"),
+                title: String::new(),
+                text: String::new(),
+                state: FileState {
+                    size: 0,
+                    modified: 0,
+                    hash: String::new(),
+                },
+            })
+            .collect()
+    }
+
+    fn tests_in(splits: &BTreeMap<String, Split>) -> Vec<String> {
+        splits
+            .iter()
+            .filter(|(_, s)| **s == Split::Test)
+            .map(|(d, _)| d.clone())
+            .collect()
+    }
+
+    #[test]
+    fn auto_holds_out_at_least_ten_documents_but_at_most_half() {
+        let auto = |n| tests_in(&split_documents(&docs(n), AutoOr::Auto).unwrap()).len();
+        assert_eq!(auto(2), 1);
+        assert_eq!(auto(11), 5);
+        assert_eq!(auto(20), 10);
+        assert_eq!(auto(30), 10);
+        // With enough documents, auto is exactly the 20% split.
+        for n in [80, 200] {
+            let auto = split_documents(&docs(n), AutoOr::Auto).unwrap();
+            let fixed = split_documents(&docs(n), AutoOr::Value(20)).unwrap();
+            assert!(tests_in(&fixed).len() >= AUTO_MIN_TEST_DOCUMENTS);
+            assert_eq!(auto, fixed);
+        }
+        // A number is respected.
+        assert!(tests_in(&split_documents(&docs(11), AutoOr::Value(20)).unwrap()).len() < 5);
+    }
+
+    #[test]
+    fn auto_tops_up_in_hash_order() {
+        // Every document `auto` tests at 30 documents is still a test
+        // document with 31, unless the extra one ranks ahead of it.
+        let small = tests_in(&split_documents(&docs(30), AutoOr::Auto).unwrap());
+        let big = tests_in(&split_documents(&docs(31), AutoOr::Auto).unwrap());
+        let moved = small.iter().filter(|d| !big.contains(d)).count();
+        assert!(moved <= 1, "{moved} documents moved");
+    }
+
+    #[test]
+    fn sampling_keeps_every_test_document() {
+        let chunk = |doc: usize, i: usize, split: Split| Chunk {
+            id: format!("{doc:03}-{i:03}"),
+            doc: format!("d{doc}"),
+            title: String::new(),
+            heading: String::new(),
+            text: String::new(),
+            hash: String::new(),
+            split,
+            lang: None,
+            truncated: None,
+        };
+        let mut chunks = Vec::new();
+        // 8 test documents with 10 chunks each, 40 training documents.
+        for d in 0..8 {
+            chunks.extend((0..10).map(|i| chunk(d, i, Split::Test)));
+        }
+        for d in 8..48 {
+            chunks.extend((0..10).map(|i| chunk(d, i, Split::Train)));
+        }
+        let sampled = sample(chunks, 30);
+        assert_eq!(sampled.len(), 30);
+        let test_docs: HashSet<&str> = sampled
+            .iter()
+            .filter(|c| c.split == Split::Test)
+            .map(|c| c.doc.as_str())
+            .collect();
+        assert_eq!(test_docs.len(), 8, "every test document keeps a chunk");
+        assert!(sampled.iter().any(|c| c.split == Split::Train));
     }
 
     #[test]

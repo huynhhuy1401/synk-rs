@@ -37,7 +37,7 @@ const TEMPLATE: &str = r#"# synk project. Edit by hand, or with `synk source ...
 #
 # [dataset]
 # chunk_tokens = "auto"            # fill what the model reads (trainer max_seq_length)
-# test_percent = 20
+# test_percent = "auto"          # 20%, or more so the test has 10+ documents
 #
 # [trainer]
 # epochs = "auto"                  # enough for ~300 steps, at most 5
