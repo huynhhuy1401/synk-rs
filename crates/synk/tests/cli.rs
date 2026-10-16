@@ -600,6 +600,29 @@ fn train_runs_everything_and_reuses_it() {
     assert_eq!(exported["data"]["run"], run);
     assert!(root.join("exported/fake-model.txt").is_file());
     assert!(root.join("exported/README.md").is_file());
+    // Copy-paste setup for the tools people embed with, with the model's
+    // own prefixes and a re-index reminder.
+    let usage = &exported["data"]["usage"];
+    for key in [
+        "sentence_transformers",
+        "llamaindex",
+        "langchain",
+        "open_webui_env",
+        "reindex",
+    ] {
+        assert!(!usage[key].is_null(), "usage.{key} missing: {usage}");
+    }
+    assert!(
+        usage["llamaindex"]
+            .as_str()
+            .unwrap()
+            .contains("query_instruction"),
+        "{usage}"
+    );
+    assert_eq!(
+        usage["open_webui_env"]["RAG_EMBEDDING_QUERY_PREFIX"],
+        usage["query_prefix"]
+    );
     let again = synk(root, &["export", run, "--out", "exported"]);
     assert_eq!(error_code(&again), "EXPORT_EXISTS");
     let forced = synk(root, &["export", run, "--out", "exported", "--force"]);

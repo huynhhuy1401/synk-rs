@@ -378,31 +378,96 @@ fn write_readme(out: &Path, readme: &str) -> Result<()> {
     fs::write(&path, readme).map_err(|e| SynkError::io(path.display(), e))
 }
 
+/// Re-indexing advice for every format: vectors from two models don't mix.
+const REINDEX: &str = "Apps that already indexed your documents with another model must re-index them with this one (delete and re-embed); vectors from two models can't be compared.";
+
+/// How to use the export, as copy-paste snippets with the real path and the
+/// model's own query/document prefixes, for the tools people embed with.
+/// Each was checked against the tool's code or docs (docs/research/
+/// v0.2-deep-dive.md, chapter H): LlamaIndex replaces the saved prompts
+/// with its own (empty) ones unless told, LangChain only passes what's in
+/// its encode kwargs, Open WebUI adds prefixes from two env vars, and
+/// Ollama and AnythingLLM add none.
 fn usage(format: Format, path: &Path, ollama: Option<&Value>, prompts: &Value) -> Value {
     let q = prompts["query"].as_str().unwrap_or("");
     let d = prompts["document"].as_str().unwrap_or("");
-    let p = path.display();
-    match format {
-        Format::St => json!({
-            "python": format!("SentenceTransformer(r\"{p}\").encode(texts, prompt_name=\"query\")  # \"document\" for documents"),
-        }),
+    let p = path.display().to_string();
+    // As Python/JSON string literals: prompts can be long instructions.
+    let lit = |s: &str| serde_json::to_string(s).expect("string serializes");
+    let no_prefix = q.is_empty() && d.is_empty();
+    let mut usage = match format {
+        Format::St => {
+            let path_lit = lit(&p);
+            let mut u = json!({
+                "python": format!("SentenceTransformer(r\"{p}\").encode(texts, prompt_name=\"query\")  # \"document\" for documents"),
+                "sentence_transformers": format!(
+                    "from sentence_transformers import SentenceTransformer\n\
+                     model = SentenceTransformer({path_lit})\n\
+                     query_vectors = model.encode_query([\"...\"], normalize_embeddings=True)\n\
+                     document_vectors = model.encode_document([\"...\"], normalize_embeddings=True)"
+                ),
+                "langchain": format!(
+                    "from langchain_huggingface import HuggingFaceEmbeddings\n\
+                     embeddings = HuggingFaceEmbeddings(\n    model_name={path_lit},\n    \
+                     encode_kwargs={{\"prompt_name\": \"document\", \"normalize_embeddings\": True}},\n    \
+                     query_encode_kwargs={{\"prompt_name\": \"query\", \"normalize_embeddings\": True}},\n)"
+                ),
+                "open_webui_env": {
+                    "RAG_EMBEDDING_ENGINE": "",
+                    "RAG_EMBEDDING_MODEL": p,
+                    "RAG_EMBEDDING_QUERY_PREFIX": q,
+                    "RAG_EMBEDDING_CONTENT_PREFIX": d,
+                },
+                "open_webui_note": "In Docker, mount this folder and set RAG_EMBEDDING_MODEL to its path inside the container. Engine and model are kept in Open WebUI's saved settings after the first start; the prefix variables are read every time.",
+            });
+            u["llamaindex"] = json!(format!(
+                "from llama_index.embeddings.huggingface import HuggingFaceEmbedding\n\
+                 embed_model = HuggingFaceEmbedding(\n    model_name={path_lit},\n    \
+                 query_instruction={},\n    text_instruction={},\n)",
+                lit(q),
+                lit(d)
+            ));
+            u
+        }
         Format::Onnx => json!({
             "onnxruntime": format!(
                 "InferenceSession(r\"{}\"): inputs input_ids and attention_mask (tokenize with the tokenizer in the folder), output sentence_embedding",
                 path.join("model.onnx").display()
             ),
-            "query_prefix": q,
-            "document_prefix": d,
         }),
-        Format::Gguf => json!({
-            "ollama": ollama.map_or_else(
-                || format!("ollama create <name> -f {}", path.with_file_name("Modelfile").display()),
-                |o| format!("ollama run {}  (embeddings: POST /api/embed)", o["name"].as_str().unwrap_or("")),
-            ),
-            "query_prefix": q,
-            "document_prefix": d,
-        }),
+        Format::Gguf => {
+            let name = ollama.and_then(|o| o["name"].as_str()).unwrap_or("<name>");
+            let embed = |prefix: &str| {
+                let body = json!({"model": name, "input": [format!("{prefix}...")]});
+                format!("curl http://localhost:11434/api/embed -d '{body}'")
+            };
+            json!({
+                "ollama": ollama.map_or_else(
+                    || format!("ollama create <name> -f {}", path.with_file_name("Modelfile").display()),
+                    |o| format!("ollama run {}  (embeddings: POST /api/embed)", o["name"].as_str().unwrap_or("")),
+                ),
+                "ollama_api": [embed(q), embed(d)],
+                "open_webui_env": {
+                    "RAG_EMBEDDING_ENGINE": "ollama",
+                    "RAG_EMBEDDING_MODEL": name,
+                    "RAG_EMBEDDING_QUERY_PREFIX": q,
+                    "RAG_EMBEDDING_CONTENT_PREFIX": d,
+                },
+                "anythingllm": if no_prefix {
+                    format!("Choose the Ollama embedder and {name}.")
+                } else {
+                    format!("Choose the Ollama embedder and {name}. AnythingLLM can't add this model's prefixes, so expect lower search quality than synk measured.")
+                },
+            })
+        }
+    };
+    usage["query_prefix"] = json!(q);
+    usage["document_prefix"] = json!(d);
+    if no_prefix {
+        usage["prefixes"] = json!("This model uses no query or document prefixes.");
     }
+    usage["reindex"] = json!(REINDEX);
+    usage
 }
 
 fn agent(timeout: Duration) -> ureq::Agent {

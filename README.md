@@ -210,8 +210,23 @@ Every export checks that the exported model's vectors match the original
 exact copy). The README synk writes describes the run and holds none of your
 text. Ollama doesn't add a model's `query: `/`passage: ` prefixes, so apps
 embedding through Ollama should add them (advice `PREFIX_DROPPED_BY_TARGET`).
-Open WebUI's built-in engine can load the sentence-transformers folder by
-path.
+
+**Using the model.** The model was trained and tested with its query and
+document prefixes (for e5: `query: ` and `passage: `); an app that leaves them
+out gets a quietly worse model. `synk export --json` prints `data.usage` with
+copy-paste setup that keeps them, filled in with your path and prefixes:
+
+| Tool | What synk gives you |
+|---|---|
+| sentence-transformers | `usage.sentence_transformers`: `encode_query` / `encode_document` |
+| LlamaIndex | `usage.llamaindex`: `HuggingFaceEmbedding(..., query_instruction=, text_instruction=)`; without them it drops the prefixes |
+| LangChain | `usage.langchain`: `HuggingFaceEmbeddings(..., encode_kwargs=, query_encode_kwargs=)` |
+| Open WebUI | `usage.open_webui_env`: `RAG_EMBEDDING_QUERY_PREFIX` / `RAG_EMBEDDING_CONTENT_PREFIX` (built-in engine with the folder, or `ollama` with a GGUF export) |
+| Ollama API | `usage.ollama_api`: `/api/embed` calls with the prefixes added |
+| AnythingLLM | Its Ollama embedder can't add prefixes; expect lower quality than synk measured |
+
+After switching models, re-index your documents in the app: vectors from two
+models can't be compared.
 
 ## Configuration
 

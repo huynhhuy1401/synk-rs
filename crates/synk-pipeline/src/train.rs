@@ -888,8 +888,10 @@ pub fn model_card(train: &Manifest, eval: Option<&Manifest>) -> String {
         card,
         "\n## Usage\n\n```python\nfrom sentence_transformers import SentenceTransformer\n\n\
          model = SentenceTransformer(\"path/to/this/folder\")\n\
-         queries = model.encode([\"...\"], prompt_name=\"query\")\n\
-         documents = model.encode([\"...\"], prompt_name=\"document\")\n```\n"
+         # encode_query / encode_document add the query and document prompts\n\
+         # saved with this model; it was trained and tested with them.\n\
+         queries = model.encode_query([\"...\"], normalize_embeddings=True)\n\
+         documents = model.encode_document([\"...\"], normalize_embeddings=True)\n```\n"
     );
     card
 }
