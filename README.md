@@ -176,13 +176,21 @@ also tests both models on NanoMSMARCO (English web search) and XQuAD
 (Vietnamese), so you see if tuning hurt ordinary search (advice
 `GENERAL_REGRESSION`).
 
-**Real queries.** If you have real searches, import them; they're used to
-test, never to train, and once there are 30 or more they decide the verdict.
-A few become style examples for the LLM instead:
+**Real queries.** Your own searches are the most honest test: they're used
+to test, never to train, and 30 or more about 10+ documents decide the
+verdict. A few become style examples for the LLM instead; they're chosen once
+and kept (`queries import --restyle` chooses again). To write some, let synk
+list documents for you, and for each write how you'd search for something you
+know is in it, **without opening it** (reading it first copies its words and
+makes the test too easy). About 15 minutes:
 
 ```sh
+synk queries template --out searches.jsonl     # 15 documents, test ones first
+# fill in the empty "query" fields, then:
 synk queries import searches.jsonl
 ```
+
+Or write the file yourself:
 
 ```json
 {"query": "tăng timeout nginx", "doc": "notes/nginx.md"}

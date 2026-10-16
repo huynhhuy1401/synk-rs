@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::{Value, json};
-use synk_core::{Result, SynkError};
+use synk_core::{ErrorCode, Result, SynkError};
 use synk_pipeline::ops::{OpKind, OpRecord, Ops};
 use synk_pipeline::{advice, queries, report, train};
 
@@ -15,26 +15,118 @@ use crate::config::Project;
 use crate::human;
 use crate::output::Output;
 
-pub fn import_queries(project: &Project, file: &Path, replace: bool) -> Result<Output> {
+pub fn import_queries(
+    project: &Project,
+    file: &Path,
+    replace: bool,
+    restyle: bool,
+) -> Result<Output> {
+    use synk_pipeline::train::{MIN_REAL_DOCUMENTS, MIN_REAL_QUERIES};
     let text = fs::read_to_string(file).map_err(|e| SynkError::io(file.display(), e))?;
     let mut store = project.open_store()?;
-    let rows = queries::parse_import(&text, &store.live_documents()?)?;
-    let stats = store.import_real_queries(&rows, replace)?;
-    let total = store.real_queries()?.len();
+    let parsed = queries::parse_import(&text, &store.live_documents()?)?;
+    let stats = store.import_real_queries(&parsed.rows, replace)?;
+    if restyle {
+        // The next build chooses the style examples again.
+        store.set_style_queries(&[])?;
+    }
+    let real = store.real_queries()?;
+    let total = real.len();
+    let documents = real
+        .iter()
+        .map(|q| q.doc.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     let next = "synk train --dry-run";
+    let decides = total >= MIN_REAL_QUERIES && documents as u64 >= MIN_REAL_DOCUMENTS;
+    let mut human = format!(
+        "Real queries: {} added, {} already there, {} removed; {total} in total, about {documents} documents.",
+        stats.added, stats.unchanged, stats.removed,
+    );
+    if parsed.skipped_empty > 0 {
+        let _ = write!(human, " {} left empty were skipped.", parsed.skipped_empty);
+    }
+    let _ = write!(
+        human,
+        "\nThey are used to evaluate, never to train; {MIN_REAL_QUERIES} or more about {MIN_REAL_DOCUMENTS}+ documents decide the verdict{}.",
+        if decides { " (yours do)" } else { "" }
+    );
+    if restyle {
+        human.push_str(
+            "\nThe style examples will be chosen again (the next dataset re-asks the LLM).",
+        );
+    }
+    let _ = write!(human, "\nNext: {next}");
     Ok(Output {
-        human: format!(
-            "Real queries: {} added, {} already there, {} removed; {total} in total.\nThey are used to evaluate, never to train; {} or more decide the verdict.\nNext: {next}",
-            stats.added,
-            stats.unchanged,
-            stats.removed,
-            synk_pipeline::train::MIN_REAL_QUERIES,
-        ),
+        human,
         data: json!({
             "added": stats.added,
             "unchanged": stats.unchanged,
             "removed": stats.removed,
+            "skipped_empty": parsed.skipped_empty,
             "total": total,
+            "documents": documents,
+            "decides_verdict": decides,
+            "restyled": restyle,
+            "next": next,
+        }),
+    })
+}
+
+/// Writes a file listing some documents with an empty search each, for the
+/// user to fill in without opening them. Test documents come first: real
+/// queries about them also show whether the generated test agrees.
+pub fn queries_template(
+    project: &Project,
+    out: &Path,
+    documents: usize,
+    force: bool,
+) -> Result<Output> {
+    if out.exists() && !force {
+        return Err(SynkError::new(
+            ErrorCode::InvalidArgs,
+            format!("{} already exists", out.display()),
+        )
+        .with_hint("pick another --out, or add --force to overwrite it"));
+    }
+    let store = project.open_store()?;
+    let docs = store.live_documents()?;
+    if docs.is_empty() {
+        return Err(
+            SynkError::new(ErrorCode::DatasetTooSmall, "no documents synced yet")
+                .with_next("synk source sync"),
+        );
+    }
+    let tests =
+        synk_pipeline::dataset::test_document_ids(&docs, project.pipeline().dataset.test_percent)
+            .unwrap_or_default();
+    let mut order: Vec<&synk_core::Document> = docs.iter().collect();
+    // Test documents first, then the rest; both in a stable shuffled order.
+    order.sort_by_key(|d| {
+        (
+            !tests.contains(&d.id),
+            blake3::hash(d.id.as_bytes()).to_hex().to_string(),
+        )
+    });
+    let chosen: Vec<(String, String)> = order
+        .into_iter()
+        .take(documents.max(1))
+        .map(|d| (d.id.clone(), d.title.clone()))
+        .collect();
+    let in_test = chosen.iter().filter(|(id, _)| tests.contains(id)).count();
+    let text = queries::template(&chosen);
+    fs::write(out, text).map_err(|e| SynkError::io(out.display(), e))?;
+    let path = crate::output::show_path(out);
+    let next = format!("synk queries import {path}");
+    Ok(Output {
+        human: format!(
+            "Wrote {path} with {} documents. For each, write how you'd search for something you know is in it, without opening it. Then: {next}",
+            chosen.len()
+        ),
+        data: json!({
+            "path": path,
+            "documents": chosen.len(),
+            "test_documents": in_test,
             "next": next,
         }),
     })

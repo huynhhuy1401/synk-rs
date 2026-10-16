@@ -78,6 +78,11 @@ CREATE TABLE query_asks (
     PRIMARY KEY (chunk_hash, generator_key)
 );
 ",
+    // 5: the real queries shown to the LLM as style examples, chosen once
+    // and kept, so importing more doesn't change every chunk's prompt.
+    "
+ALTER TABLE real_queries ADD COLUMN style INTEGER NOT NULL DEFAULT 0;
+",
 ];
 
 /// One cached generated query.
@@ -97,6 +102,9 @@ pub struct RealQuery {
     pub query: String,
     pub doc: String,
     pub passage: Option<String>,
+    /// Shown to the LLM as an example of the user's style (and therefore
+    /// left out of evaluation).
+    pub style: bool,
 }
 
 /// What `import_real_queries` did.
@@ -383,7 +391,7 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, query, doc, passage FROM real_queries WHERE deleted = 0 ORDER BY id",
+                "SELECT id, query, doc, passage, style FROM real_queries WHERE deleted = 0 ORDER BY id",
             )
             .map_err(store_err)?;
         let rows = stmt
@@ -393,10 +401,25 @@ impl Store {
                     query: r.get(1)?,
                     doc: r.get(2)?,
                     passage: r.get(3)?,
+                    style: r.get::<_, i64>(4)? == 1,
                 })
             })
             .map_err(store_err)?;
         rows.collect::<rusqlite::Result<_>>().map_err(store_err)
+    }
+
+    /// Makes exactly `ids` the style examples (none clears the pool, so the
+    /// next build chooses again).
+    pub fn set_style_queries(&self, ids: &[i64]) -> Result<()> {
+        // One statement, so the pool changes all at once. IDs are integers.
+        let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        self.conn
+            .execute(
+                &format!("UPDATE real_queries SET style = (id IN ({list}))"),
+                [],
+            )
+            .map_err(store_err)?;
+        Ok(())
     }
 
     /// Live documents of `source`, keyed by ID.

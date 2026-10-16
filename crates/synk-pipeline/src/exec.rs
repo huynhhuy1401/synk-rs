@@ -153,7 +153,7 @@ pub fn run(
                 let store = ws.open_store()?;
                 let artifacts = ws.artifacts();
                 let (dataset_cfg, chunking, generator) =
-                    graph::dataset_inputs(ws, &preview.model, preview.options.sample)?;
+                    graph::dataset_inputs(ws, &store, &preview.model, preview.options.sample)?;
                 let prepared = dataset::prepare(
                     &store,
                     &dataset_cfg,

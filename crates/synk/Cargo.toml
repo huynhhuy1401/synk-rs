@@ -16,6 +16,7 @@ synk-core.workspace = true
 synk-store.workspace = true
 synk-connectors.workspace = true
 synk-pipeline.workspace = true
+blake3.workspace = true
 clap.workspace = true
 dunce.workspace = true
 serde.workspace = true

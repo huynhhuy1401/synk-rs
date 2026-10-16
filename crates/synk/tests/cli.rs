@@ -935,6 +935,85 @@ fn the_dry_run_warns_when_the_test_is_too_small_for_a_verdict() {
 }
 
 #[test]
+fn a_template_of_searches_imports_and_style_examples_stay_fixed() {
+    let dir = bigger_project();
+    let root = dir.path();
+    sync(root);
+    let made = synk(
+        root,
+        &[
+            "queries",
+            "template",
+            "--out",
+            "searches.jsonl",
+            "--documents",
+            "12",
+        ],
+    );
+    assert_eq!(made["data"]["documents"], 12, "{made}");
+    assert!(made["data"]["test_documents"].as_u64().unwrap() >= 1);
+    assert_eq!(made["data"]["next"], "synk queries import searches.jsonl");
+    let again = synk(root, &["queries", "template", "--out", "searches.jsonl"]);
+    assert_eq!(error_code(&again), "INVALID_ARGS");
+
+    // Fill in 8 of the 12, as a person would; leave the rest empty.
+    let text = fs::read_to_string(root.join("searches.jsonl")).unwrap();
+    let mut filled = 0;
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if l.contains("\"query\":\"\"") && filled < 8 {
+                filled += 1;
+                l.replace("\"query\":\"\"", &format!("\"query\":\"search {filled}\""))
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect();
+    fs::write(root.join("searches.jsonl"), lines.join("\n")).unwrap();
+    let imported = synk(root, &["queries", "import", "searches.jsonl"]);
+    assert_eq!(imported["data"]["added"], 8, "{imported}");
+    assert_eq!(imported["data"]["skipped_empty"], 4);
+    assert_eq!(imported["data"]["documents"], 8);
+    assert_eq!(imported["data"]["decides_verdict"], false);
+
+    // Build once: 2 of the 8 become style examples, then stay.
+    synk(root, &["dataset"]);
+    let listed = synk(root, &["queries", "list"]);
+    let style = |v: &Value| {
+        v["data"]["queries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|q| q["style"] == true)
+            .map(|q| q["query"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let before = style(&listed);
+    assert_eq!(before.len(), 2, "{listed}");
+    // More searches: the examples don't change, so the LLM isn't re-asked.
+    fs::write(
+        root.join("more.jsonl"),
+        "{\"query\": \"another search\", \"doc\": \"n1.md\"}\n{\"query\": \"and one more\", \"doc\": \"n2.md\"}\n{\"query\": \"a third\", \"doc\": \"n3.md\"}\n{\"query\": \"a fourth\", \"doc\": \"n4.md\"}\n",
+    )
+    .unwrap();
+    synk(root, &["queries", "import", "more.jsonl"]);
+    assert_eq!(style(&synk(root, &["queries", "list"])), before);
+    let preview = synk(root, &["dataset", "--dry-run"]);
+    let dataset = preview["data"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["step"] == "dataset")
+        .unwrap()
+        .clone();
+    assert_eq!(dataset["detail"]["llm_calls"], 0, "{dataset}");
+    // --restyle chooses again.
+    let restyled = synk(root, &["queries", "import", "more.jsonl", "--restyle"]);
+    assert_eq!(restyled["data"]["restyled"], true);
+}
+
+#[test]
 fn a_failing_generator_passes_on_the_servers_message() {
     let dir = synced_project();
     let root = dir.path();

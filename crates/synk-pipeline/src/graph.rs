@@ -425,6 +425,7 @@ pub fn pin(
 /// The dataset step's inputs: the chunker and a connected generator.
 pub fn dataset_inputs(
     ws: &Workspace,
+    store: &Store,
     model: &ModelSpec,
     sample: Option<usize>,
 ) -> Result<(crate::config::DatasetConfig, Chunking, OpenAiGenerator)> {
@@ -440,9 +441,10 @@ pub fn dataset_inputs(
     let chunking = Chunking::new(&dataset_cfg, ws.cfg.trainer.max_seq_length, counter)?;
     let mut generator = OpenAiGenerator::new(&ws.cfg.generator)?;
     generator.connect()?;
-    let store = ws.open_store()?;
+    // The caller's store: a preview looks inside a transaction it rolls
+    // back, and a second connection couldn't write while it's open.
     generator.set_style(
-        dataset::style_pool(&store)?
+        dataset::style_pool(store)?
             .into_iter()
             .map(|q| q.query)
             .collect(),
@@ -712,7 +714,7 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
             if docs < 2 {
                 return Ok(None);
             }
-            Ok(Some(match dataset_inputs(ws, &model, opts.sample) {
+            Ok(Some(match dataset_inputs(ws, store, &model, opts.sample) {
                 Err(e) => Err(e),
                 Ok((dataset_cfg, chunking, generator)) => {
                     let prepared = dataset::prepare(

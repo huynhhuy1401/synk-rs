@@ -246,14 +246,36 @@ pub fn queries_per_chunk(setting: AutoOr<usize>, train_chunks: usize) -> usize {
 }
 
 /// Real queries shown to the generator as examples of the user's style, and
-/// therefore left out of evaluation: one in four, at most five, picked by a
-/// hash of their text so the choice is stable.
+/// therefore left out of evaluation. Chosen once (one in four, at most five,
+/// by a hash of their text) and then kept, so importing more real queries
+/// doesn't change the prompt of every chunk and re-ask the LLM for all of
+/// them; `synk queries import --restyle` chooses again.
 pub fn style_pool(store: &Store) -> Result<Vec<synk_store::RealQuery>> {
+    // Always in the same order: the prompt lists them, and is cached by it.
     let mut real = store.real_queries()?;
-    let n = (real.len() / 4).min(MAX_STYLE_EXAMPLES);
     real.sort_by_key(|q| short_hash(&q.query));
-    real.truncate(n);
-    Ok(real)
+    let chosen: Vec<_> = real.iter().filter(|q| q.style).cloned().collect();
+    if !chosen.is_empty() {
+        return Ok(chosen);
+    }
+    let mut pool = real;
+    let n = (pool.len() / 4).min(MAX_STYLE_EXAMPLES);
+    pool.truncate(n);
+    if !pool.is_empty() {
+        let ids: Vec<i64> = pool.iter().map(|q| q.id).collect();
+        store.set_style_queries(&ids)?;
+    }
+    Ok(pool)
+}
+
+/// The document IDs of the test split, in the order `split_documents`
+/// considers them (for `synk queries template`).
+pub fn test_document_ids(docs: &[Document], test_percent: AutoOr<u8>) -> Result<Vec<String>> {
+    Ok(split_documents(docs, test_percent)?
+        .into_iter()
+        .filter(|(_, s)| *s == Split::Test)
+        .map(|(id, _)| id)
+        .collect())
 }
 
 /// The headings above `chunk` in `doc_text`, outermost first.

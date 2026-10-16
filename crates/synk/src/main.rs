@@ -42,7 +42,7 @@ Config:
   init      Create synk.toml
   source    Add, remove, list and sync sources
   config    Show, get, set and unset settings in synk.toml
-  queries   Import real queries to test with
+  queries   Write or import real searches to test with
 
 Machine:
   setup     Install the Python trainer (once per machine)
@@ -236,7 +236,7 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Import real queries (searches people made) to test with
+    /// Write or import real searches (how people search) to test with
     Queries {
         #[command(subcommand)]
         action: QueriesAction,
@@ -351,12 +351,30 @@ enum ConfigAction {
 
 #[derive(Subcommand)]
 enum QueriesAction {
+    /// Write a file of documents with an empty search each, to fill in and import
+    #[command(
+        after_help = "Examples:\n  synk queries template --out searches.jsonl\n  synk queries template --out searches.jsonl --documents 25\n\nFor each document, write how you'd search for something you know is in it,\nwithout opening it. Then: synk queries import searches.jsonl"
+    )]
+    Template {
+        /// The file to write
+        #[arg(long)]
+        out: PathBuf,
+        /// How many documents to list (searches about 10+ documents decide the verdict)
+        #[arg(long, default_value_t = 15)]
+        documents: usize,
+        /// Overwrite the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
     /// Add queries from a JSONL file: {"query": ..., "doc": <document ID>} and/or "text": <answering passage>
     Import {
         file: PathBuf,
         /// Replace all previously imported queries
         #[arg(long)]
         replace: bool,
+        /// Choose the style examples shown to the LLM again (re-asks it for every chunk)
+        #[arg(long)]
+        restyle: bool,
     },
     /// List imported queries
     List,
@@ -506,7 +524,16 @@ fn main() -> ExitCode {
             ConfigAction::Unset { key } => config_cmd::unset(p, key),
         }),
         Command::Queries { action } => project().and_then(|p| match action {
-            QueriesAction::Import { file, replace } => views::import_queries(&p, file, *replace),
+            QueriesAction::Template {
+                out,
+                documents,
+                force,
+            } => views::queries_template(&p, out, *documents, *force),
+            QueriesAction::Import {
+                file,
+                replace,
+                restyle,
+            } => views::import_queries(&p, file, *replace, *restyle),
             QueriesAction::List => views::list_queries(&p),
         }),
         Command::Setup { backend, force } => {

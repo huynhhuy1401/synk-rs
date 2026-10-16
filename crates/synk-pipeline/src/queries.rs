@@ -14,6 +14,17 @@ use synk_core::{Document, ErrorCode, Result, SynkError};
 /// A validated row: query, document ID, and the passage if one was given.
 pub type ImportRow = (String, String, Option<String>);
 
+/// What a file held: the rows to import, and how many template lines were
+/// left unfilled (a `doc` with an empty `query`).
+#[derive(Debug)]
+pub struct Parsed {
+    pub rows: Vec<ImportRow>,
+    pub skipped_empty: usize,
+}
+
+/// The first line of a template: instructions, skipped on import.
+pub const TEMPLATE_HELP: &str = "For each document below, write in \"query\" how you would search for something you know is in it, without opening it (reading it first copies its words and makes the test too easy). Leave a line's query empty to skip it. Then: synk queries import <this file>";
+
 /// At most this many problems are listed in one error.
 const MAX_REPORTED: usize = 10;
 
@@ -28,14 +39,26 @@ pub fn normalize(text: &str) -> String {
 
 /// Parses and checks a JSONL import against the live documents. Fails as a
 /// whole if any line is bad, so a half-imported file never happens.
-pub fn parse_import(text: &str, docs: &[Document]) -> Result<Vec<ImportRow>> {
+pub fn parse_import(text: &str, docs: &[Document]) -> Result<Parsed> {
     let normalized: Vec<String> = docs.iter().map(|d| normalize(&d.text)).collect();
     let mut rows = Vec::new();
     let mut problems = Vec::new();
+    let mut skipped_empty = 0;
     for (n, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
+        }
+        // A template's help line, and its lines nobody filled in.
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            if value.get("_help").is_some() {
+                continue;
+            }
+            let unfilled = value["query"].as_str().is_some_and(|q| q.trim().is_empty());
+            if unfilled && value.get("doc").is_some() {
+                skipped_empty += 1;
+                continue;
+            }
         }
         match parse_row(line, docs, &normalized) {
             Ok(row) => rows.push(row),
@@ -58,12 +81,28 @@ pub fn parse_import(text: &str, docs: &[Document]) -> Result<Vec<ImportRow>> {
         ));
     }
     if rows.is_empty() {
-        return Err(SynkError::new(
-            ErrorCode::QueriesInvalid,
-            "the file has no queries",
-        ));
+        let message = if skipped_empty > 0 {
+            format!("none of the {skipped_empty} searches in the file is filled in")
+        } else {
+            "the file has no queries".to_owned()
+        };
+        return Err(SynkError::new(ErrorCode::QueriesInvalid, message));
     }
-    Ok(rows)
+    Ok(Parsed {
+        rows,
+        skipped_empty,
+    })
+}
+
+/// The lines of a template for `docs` (ID, title), help line first.
+pub fn template(docs: &[(String, String)]) -> String {
+    let mut out = serde_json::json!({ "_help": TEMPLATE_HELP }).to_string();
+    out.push('\n');
+    for (id, title) in docs {
+        out.push_str(&serde_json::json!({ "doc": id, "title": title, "query": "" }).to_string());
+        out.push('\n');
+    }
+    out
 }
 
 fn parse_row(line: &str, docs: &[Document], normalized: &[String]) -> Result<ImportRow, String> {
@@ -159,10 +198,30 @@ mod tests {
 {"query": "postgres bloat", "text": "vacuum   WEEKLY"}
 {"query": "x", "doc": "notes/b.md", "text": "Vacuum weekly."}
 "#;
-        let rows = parse_import(text, &docs).unwrap();
+        let rows = parse_import(text, &docs).unwrap().rows;
         assert_eq!(rows[0], ("nginx timeout".into(), "notes/a.md".into(), None));
         assert_eq!(rows[1].1, "notes/b.md");
         assert_eq!(rows[2].2.as_deref(), Some("Vacuum weekly."));
+    }
+
+    #[test]
+    fn a_template_imports_its_filled_lines_only() {
+        let docs = [doc("notes/a.md", "x"), doc("notes/b.md", "y")];
+        let docs_ids = [
+            ("notes/a.md".to_owned(), "A".to_owned()),
+            ("notes/b.md".to_owned(), "B".to_owned()),
+        ];
+        let blank = template(&docs_ids);
+        assert!(blank.lines().next().unwrap().contains("without opening it"));
+        assert_eq!(
+            parse_import(&blank, &docs).err().unwrap().message,
+            "none of the 2 searches in the file is filled in"
+        );
+        let filled = blank.replacen("\"query\":\"\"", "\"query\":\"nginx timeout\"", 1);
+        let parsed = parse_import(&filled, &docs).unwrap();
+        assert_eq!(parsed.rows.len(), 1);
+        assert_eq!(parsed.rows[0].1, "notes/a.md");
+        assert_eq!(parsed.skipped_empty, 1);
     }
 
     #[test]
