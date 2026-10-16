@@ -37,6 +37,22 @@ def emit(event, **fields):
     sys.stdout.flush()
 
 
+def watch_lifeline():
+    """synk keeps this process's stdin open while it runs. When synk is gone
+    (Ctrl-C twice, killed, crashed), stdin closes and the trainer exits
+    instead of training on as an orphan."""
+    import threading
+
+    def watch():
+        try:
+            while sys.stdin.buffer.read(4096):
+                pass
+        finally:
+            os._exit(3)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def stop_requested():
     return bool(STOP_FILE) and os.path.exists(STOP_FILE)
 
@@ -1068,6 +1084,8 @@ def main(argv):
                 req = json.load(f)
             global STOP_FILE
             STOP_FILE = req.get("stop_file")
+            if req.get("lifeline"):
+                watch_lifeline()
             if req.get("v") != PROTOCOL_VERSION:
                 raise SidecarError("SIDECAR_PROTOCOL", f"unsupported request version {req.get('v')}")
             task = TASKS.get(req.get("task"))
@@ -1078,6 +1096,10 @@ def main(argv):
         raise SidecarError("SIDECAR_PROTOCOL", "usage: synk_sidecar.py describe | run <request.json>")
     except SidecarError as e:
         emit("error", code=e.code, message=e.message)
+        return 1
+    except KeyboardInterrupt:
+        # Run on its own, the trainer may still get a Ctrl-C.
+        emit("error", code="CANCELLED", message="the trainer was interrupted")
         return 1
     except Exception as e:  # noqa: BLE001 - report every crash as an event
         import traceback

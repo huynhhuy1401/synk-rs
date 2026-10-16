@@ -17,7 +17,9 @@ fn command(dir: &Path, extra: &[(&str, &str)]) -> Command {
     cmd.current_dir(dir)
         .env("SYNK_HOME", dir.join(".synk-home"))
         .env("SYNK_FAKE_TRAINER", "1")
-        .env_remove("SYNK_FAKE_TRAINER_SLOW");
+        .env_remove("SYNK_FAKE_TRAINER_SLOW")
+        .env_remove("SYNK_FAKE_TRAINER_STUCK")
+        .env_remove("SYNK_TEST_INTERRUPT_AFTER_MS");
     for (k, v) in extra {
         cmd.env(k, v);
     }
@@ -794,6 +796,95 @@ fn runs_can_be_waited_cancelled_and_continued() {
         error_code(&synk(root, &["train", "1", "--set", "trainer.epochs=2"])),
         "INVALID_ARGS"
     );
+}
+
+/// Starts `synk --json train` with a slow fake training step and these
+/// extra variables, after building the dataset, and waits for it to end.
+fn train_interrupted(root: &Path, extra: &[(&str, &str)]) -> (Value, Option<i32>) {
+    let mut vars = vec![("SYNK_FAKE_TRAINER_SLOW", "20000")];
+    vars.extend_from_slice(extra);
+    let out = command(root, &vars)
+        .args(["--json", "--progress", "jsonl", "train"])
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout must be exactly one JSON object ({e}): {}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    });
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.lines().any(|l| l.contains(r#""event":"interrupt""#)),
+        "{stderr}"
+    );
+    (value, out.status.code())
+}
+
+#[test]
+fn ctrl_c_stops_at_a_safe_point_and_the_run_continues() {
+    let dir = bigger_project();
+    let root = dir.path();
+    synk(root, &["dataset"]);
+    let (stopped, code) = train_interrupted(root, &[("SYNK_TEST_INTERRUPT_AFTER_MS", "1500")]);
+    assert_eq!(code, Some(130), "{stopped}");
+    assert_eq!(error_code(&stopped), "CANCELLED");
+    assert_eq!(stopped["error"]["details"]["how"], "safe_stop", "{stopped}");
+    let record = synk(root, &["wait", "run:1", "--timeout", "0s"]);
+    assert_eq!(record["data"]["state"], "cancelled");
+    assert_eq!(record["data"]["next"], "synk train run:1");
+    // The lock is free, and the obvious retry continues the same run.
+    let again = synk(root, &["train"]);
+    assert_eq!(again["data"]["id"], "run:1-tiny-model", "{again}");
+    assert_eq!(again["data"]["op"]["attempt"], 2);
+}
+
+#[test]
+fn a_second_ctrl_c_stops_at_once() {
+    let dir = bigger_project();
+    let root = dir.path();
+    synk(root, &["dataset"]);
+    let (stopped, code) = train_interrupted(
+        root,
+        &[
+            ("SYNK_TEST_INTERRUPT_AFTER_MS", "1500,1600"),
+            ("SYNK_FAKE_TRAINER_STUCK", "1"),
+        ],
+    );
+    assert_eq!(code, Some(130), "{stopped}");
+    assert_eq!(error_code(&stopped), "CANCELLED");
+    assert_eq!(stopped["error"]["details"]["how"], "immediate", "{stopped}");
+    assert_eq!(stopped["error"]["next"], "synk train run:1");
+    let record = synk(root, &["wait", "run:1", "--timeout", "0s"]);
+    assert_eq!(record["data"]["state"], "cancelled", "{record}");
+    let again = synk(root, &["train"]);
+    assert_eq!(again["data"]["op"]["attempt"], 2, "{again}");
+}
+
+#[test]
+fn a_killed_run_reads_as_interrupted_at_once_and_continues() {
+    let dir = bigger_project();
+    let root = dir.path();
+    synk(root, &["dataset"]);
+    let mut child = command(root, &[("SYNK_FAKE_TRAINER_SLOW", "20000")])
+        .args(["--json", "train"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while synk(root, &["wait", "--timeout", "0s"])["data"]["state"] != "running" {
+        assert!(started.elapsed() < Duration::from_secs(30), "never started");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    // No 2-minute heartbeat wait: the OS released the lock with the process.
+    let record = synk(root, &["wait", "run:1", "--timeout", "0s"]);
+    assert_eq!(record["data"]["state"], "interrupted", "{record}");
+    let again = synk(root, &["train"]);
+    assert_eq!(again["data"]["id"], "run:1-tiny-model", "{again}");
+    assert_eq!(again["data"]["op"]["attempt"], 2);
 }
 
 #[test]

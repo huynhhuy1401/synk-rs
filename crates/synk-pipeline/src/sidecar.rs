@@ -190,14 +190,20 @@ impl TrainerEnv {
             return crate::fake_trainer::run(request, on_event);
         }
         let request_path = work_dir.join("request.json");
-        let text = serde_json::to_string_pretty(request).expect("request serializes");
+        // The trainer exits when its stdin closes, i.e. when synk is gone.
+        let mut request = request.clone();
+        request["lifeline"] = serde_json::json!(true);
+        let text = serde_json::to_string_pretty(&request).expect("request serializes");
         fs::write(&request_path, text).map_err(|e| SynkError::io(request_path.display(), e))?;
         let log_path = work_dir.join("sidecar.log");
         let log = fs::File::create(&log_path).map_err(|e| SynkError::io(log_path.display(), e))?;
 
-        let mut child = sidecar_command(&self.python)?
+        let mut command = sidecar_command(&self.python)?;
+        own_process_group(&mut command);
+        let mut child = command
             .arg("run")
             .arg(&request_path)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(log)
             .spawn()
@@ -209,6 +215,8 @@ impl TrainerEnv {
                 .with_next("synk setup --force")
             })?;
 
+        // Held open until the trainer is done; dropped with synk otherwise.
+        let lifeline = child.stdin.take();
         let mut outcome = None;
         let stdout = child.stdout.take().expect("piped stdout");
         for line in BufReader::new(stdout).lines() {
@@ -223,6 +231,7 @@ impl TrainerEnv {
             }
         }
         let status = child.wait().map_err(|e| SynkError::io("sidecar", e))?;
+        drop(lifeline);
         match outcome {
             Some(result) => result,
             None => Err(SynkError::new(
@@ -233,6 +242,23 @@ impl TrainerEnv {
                 ),
             )),
         }
+    }
+}
+
+/// Starts the trainer in its own process group, so the terminal's Ctrl-C
+/// reaches only synk, which then stops the trainer at a safe point instead
+/// of it dying mid-step.
+fn own_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
     }
 }
 

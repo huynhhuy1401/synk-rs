@@ -176,7 +176,8 @@ fn shared_schemas() -> Value {
             "description": "stderr with --progress jsonl (and op starts under --json), and synk logs",
             "properties": {
                 "v": {"const": 1},
-                "event": {"enum": ["op", "progress", "log", "heartbeat"]},
+                "event": {"enum": ["op", "progress", "log", "heartbeat", "interrupt"]},
+                "count": {"type": "integer", "description": "interrupt events: which Ctrl-C press (1 = stopping at a safe point, 2 = stopping now)"},
                 "id": {"type": "string", "description": "op events: the run, dataset or fetch ID"},
                 "kind": {"enum": ["run", "dataset", "fetch"]},
                 "attempt": {"type": "integer"},

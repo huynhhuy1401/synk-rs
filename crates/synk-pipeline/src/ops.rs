@@ -655,6 +655,7 @@ impl Ops {
         fs::write(&lock, &record.id).map_err(|e| SynkError::io(lock.display(), e))?;
 
         let shared = Arc::new(Mutex::new(record));
+        crate::interrupt::register(dir.clone(), lock.clone(), shared.clone());
         let stop = Arc::new(AtomicBool::new(false));
         let heartbeat = {
             let (shared, stop, dir) = (shared.clone(), stop.clone(), dir.clone());
@@ -767,7 +768,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     fs::write(path, text).map_err(|e| SynkError::io(path.display(), e))
 }
 
-fn write_record(dir: &Path, record: &OpRecord) -> Result<()> {
+pub(crate) fn write_record(dir: &Path, record: &OpRecord) -> Result<()> {
     let path = dir.join("op.json");
     let tmp = dir.join("op.json.tmp");
     let text = serde_json::to_string_pretty(record).expect("op record serializes");
@@ -915,6 +916,7 @@ impl Op {
         }
         let _ = fs::remove_file(&self.lock);
         self.held = None;
+        crate::interrupt::unregister();
     }
 }
 

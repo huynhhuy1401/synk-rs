@@ -34,10 +34,13 @@ pub fn describe() -> Value {
     })
 }
 
+/// Whether a stop was asked for. `SYNK_FAKE_TRAINER_STUCK=1` plays a
+/// trainer that never notices (for the second Ctrl-C).
 fn stopped(request: &Value) -> bool {
-    request["stop_file"]
-        .as_str()
-        .is_some_and(|p| Path::new(p).exists())
+    std::env::var("SYNK_FAKE_TRAINER_STUCK").is_err()
+        && request["stop_file"]
+            .as_str()
+            .is_some_and(|p| Path::new(p).exists())
 }
 
 fn cancelled() -> SynkError {

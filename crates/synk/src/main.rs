@@ -403,6 +403,24 @@ fn main() -> ExitCode {
         Err(e) => e.exit(),
     };
     output::set_verbose(cli.verbose);
+    let (json, jsonl) = (cli.json, cli.progress == pipeline::ProgressMode::Jsonl);
+    let _ = ctrlc::set_handler(move || output::on_interrupt(json, jsonl));
+    // Tests: simulate Ctrl-C presses after these many milliseconds
+    // (comma-separated), on every OS.
+    if let Ok(delays) = std::env::var("SYNK_TEST_INTERRUPT_AFTER_MS") {
+        let delays: Vec<u64> = delays
+            .split(',')
+            .filter_map(|d| d.trim().parse().ok())
+            .collect();
+        std::thread::spawn(move || {
+            let mut slept = 0;
+            for at in delays {
+                std::thread::sleep(Duration::from_millis(at.saturating_sub(slept)));
+                slept = at;
+                output::on_interrupt(json, jsonl);
+            }
+        });
+    }
     let config = cli.config.as_deref();
     let project = || Project::find(config);
     let progress = || pipeline::Progress::new(cli.progress, cli.json);

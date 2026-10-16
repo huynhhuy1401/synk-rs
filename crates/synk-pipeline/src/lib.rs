@@ -19,6 +19,7 @@ pub mod generator;
 pub mod graph;
 pub mod hub;
 pub mod ids;
+pub mod interrupt;
 pub mod lang;
 pub mod ops;
 pub mod queries;
