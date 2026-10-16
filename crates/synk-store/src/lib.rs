@@ -83,6 +83,14 @@ CREATE TABLE query_asks (
     "
 ALTER TABLE real_queries ADD COLUMN style INTEGER NOT NULL DEFAULT 0;
 ",
+    // 6: small facts about the store, e.g. which reader version wrote the
+    // documents' text.
+    "
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+",
 ];
 
 /// One cached generated query.
@@ -406,6 +414,25 @@ impl Store {
             })
             .map_err(store_err)?;
         rows.collect::<rusqlite::Result<_>>().map_err(store_err)
+    }
+
+    /// A stored fact (see migration 6).
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()
+            .map_err(store_err)
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [key, value],
+            )
+            .map_err(store_err)?;
+        Ok(())
     }
 
     /// Makes exactly `ids` the style examples (none clears the pool, so the

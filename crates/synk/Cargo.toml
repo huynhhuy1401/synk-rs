@@ -26,4 +26,5 @@ toml_edit.workspace = true
 ctrlc.workspace = true
 
 [dev-dependencies]
+rusqlite.workspace = true
 tempfile.workspace = true

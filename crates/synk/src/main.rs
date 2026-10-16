@@ -439,6 +439,21 @@ fn main() -> ExitCode {
             }
         });
     }
+    // Tests: one simulated press per line added to this file, so a test
+    // can press exactly when the run has reached the point it tests.
+    if let Some(path) = std::env::var_os("SYNK_TEST_INTERRUPT_FILE") {
+        std::thread::spawn(move || {
+            let mut pressed = 0;
+            loop {
+                let lines = std::fs::read_to_string(&path).map_or(0, |t| t.lines().count());
+                while pressed < lines {
+                    pressed += 1;
+                    output::on_interrupt(json, jsonl);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+    }
     let config = cli.config.as_deref();
     let project = || Project::find(config);
     let progress = || pipeline::Progress::new(cli.progress, cli.json);

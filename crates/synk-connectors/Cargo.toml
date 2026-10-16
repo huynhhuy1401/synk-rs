@@ -11,6 +11,7 @@ repository.workspace = true
 synk-core.workspace = true
 blake3.workspace = true
 globset.workspace = true
+unicode-normalization.workspace = true
 ignore.workspace = true
 htmd = "0.5.6"
 pdf-extract = "0.12.1"

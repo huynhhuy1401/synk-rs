@@ -592,7 +592,8 @@ fn push_clean(
     cross: bool,
     chunk: &str,
 ) {
-    let text = text.trim().trim_matches('"').trim();
+    let text = synk_connectors::readers::nfc(text.trim().trim_matches('"').trim());
+    let text = text.as_str();
     let chars = text.chars().count();
     if !(2..=MAX_QUERY_CHARS).contains(&chars) {
         return;

@@ -20,6 +20,7 @@ fn command(dir: &Path, extra: &[(&str, &str)]) -> Command {
         .env_remove("SYNK_FAKE_TRAINER_SLOW")
         .env_remove("SYNK_FAKE_TRAINER_STUCK")
         .env_remove("SYNK_TEST_INTERRUPT_AFTER_MS")
+        .env_remove("SYNK_TEST_INTERRUPT_FILE")
         .env_remove("SYNK_TEST_FREE_BYTES")
         .env_remove("SYNK_DISK_CHECK");
     for (k, v) in extra {
@@ -800,15 +801,45 @@ fn runs_can_be_waited_cancelled_and_continued() {
     );
 }
 
-/// Starts `synk --json train` with a slow fake training step and these
-/// extra variables, after building the dataset, and waits for it to end.
-fn train_interrupted(root: &Path, extra: &[(&str, &str)]) -> (Value, Option<i32>) {
-    let mut vars = vec![("SYNK_FAKE_TRAINER_SLOW", "20000")];
+/// Starts `synk --json train` with a slow fake training step, waits until
+/// it is training, then presses Ctrl-C `presses` times (through the test
+/// hook), and returns its result and exit code.
+fn train_interrupted(root: &Path, presses: usize, extra: &[(&str, &str)]) -> (Value, Option<i32>) {
+    let presses_file = root.join("presses.txt");
+    let mut vars = vec![
+        ("SYNK_FAKE_TRAINER_SLOW", "20000"),
+        ("SYNK_TEST_INTERRUPT_FILE", presses_file.to_str().unwrap()),
+    ];
     vars.extend_from_slice(extra);
-    let out = command(root, &vars)
+    let child = command(root, &vars)
         .args(["--json", "--progress", "jsonl", "train"])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    let started = Instant::now();
+    loop {
+        let j = synk(root, &["wait", "--timeout", "0s"]);
+        let training = j["data"]["progress"]["step"] == "train"
+            || j["data"]["steps"]
+                .as_array()
+                .is_some_and(|s| s.iter().any(|s| s["step"] == "dataset"));
+        if j["data"]["state"] == "running" && training {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "never trained: {j}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for _ in 0..presses {
+        let mut text = fs::read_to_string(&presses_file).unwrap_or_default();
+        text.push_str("press\n");
+        fs::write(&presses_file, text).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    let out = child.wait_with_output().unwrap();
     let value: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(
             "stdout must be exactly one JSON object ({e}): {}",
@@ -828,7 +859,7 @@ fn ctrl_c_stops_at_a_safe_point_and_the_run_continues() {
     let dir = bigger_project();
     let root = dir.path();
     synk(root, &["dataset"]);
-    let (stopped, code) = train_interrupted(root, &[("SYNK_TEST_INTERRUPT_AFTER_MS", "1500")]);
+    let (stopped, code) = train_interrupted(root, 1, &[]);
     assert_eq!(code, Some(130), "{stopped}");
     assert_eq!(error_code(&stopped), "CANCELLED");
     assert_eq!(stopped["error"]["details"]["how"], "safe_stop", "{stopped}");
@@ -846,13 +877,7 @@ fn a_second_ctrl_c_stops_at_once() {
     let dir = bigger_project();
     let root = dir.path();
     synk(root, &["dataset"]);
-    let (stopped, code) = train_interrupted(
-        root,
-        &[
-            ("SYNK_TEST_INTERRUPT_AFTER_MS", "1500,1600"),
-            ("SYNK_FAKE_TRAINER_STUCK", "1"),
-        ],
-    );
+    let (stopped, code) = train_interrupted(root, 2, &[("SYNK_FAKE_TRAINER_STUCK", "1")]);
     assert_eq!(code, Some(130), "{stopped}");
     assert_eq!(error_code(&stopped), "CANCELLED");
     assert_eq!(stopped["error"]["details"]["how"], "immediate", "{stopped}");
@@ -1063,6 +1088,44 @@ fn the_dry_run_checks_free_disk_space() {
             .any(|a| a["code"] == "DISK_SPACE_TIGHT"),
         "{warned}"
     );
+}
+
+#[test]
+fn text_is_normalized_and_an_old_store_is_read_again_once() {
+    let dir = project_with_notes();
+    let root = dir.path();
+    // "Tiếng Việt" typed as base letters plus combining marks (NFD).
+    fs::write(
+        root.join("notes/nfd.md"),
+        "# Tie\u{0302}\u{0301}ng Vie\u{0323}\u{0302}t\n\nGhi chu\u{0301} ve\u{0300} vie\u{0323}c sao lu\u{031B}u.",
+    )
+    .unwrap();
+    synk(root, &["source", "add", "notes"]);
+    let first = synk(root, &["source", "sync"]);
+    assert_eq!(first["data"]["sync"]["reread"], false, "{first}");
+    let db = rusqlite::Connection::open(root.join(".synk/synk.db")).unwrap();
+    let text: String = db
+        .query_row(
+            "SELECT text FROM documents WHERE id LIKE '%nfd.md'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(text.contains("Tiếng Việt"), "stored text is NFC: {text:?}");
+
+    // A store written by an older reader: every file is read again, once.
+    db.execute(
+        "UPDATE meta SET value = '1' WHERE key = 'reader_version'",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let again = synk(root, &["source", "sync"]);
+    assert_eq!(again["data"]["sync"]["reread"], true, "{again}");
+    assert!(again["data"]["sync"]["totals"]["updated"].as_u64().unwrap() >= 1);
+    let third = synk(root, &["source", "sync"]);
+    assert_eq!(third["data"]["sync"]["reread"], false);
+    assert_eq!(third["data"]["sync"]["totals"]["updated"], 0);
 }
 
 #[test]

@@ -96,6 +96,12 @@ pub fn sync(project: &Project) -> Result<Output> {
         "Documents: {} new, {} changed, {} deleted, {} unchanged\n",
         t.added, t.updated, t.deleted, t.unchanged
     );
+    if outcome.reread {
+        human.push_str(
+            "synk now reads files differently (Unicode NFC), so every file was read again once.
+",
+        );
+    }
     crate::work::render_skipped(&mut human, &outcome);
     let next = "synk train --dry-run";
     let _ = write!(human, "Next: {next}");
@@ -105,6 +111,7 @@ pub fn sync(project: &Project) -> Result<Output> {
             "sync": {
                 "totals": outcome.totals,
                 "removed_sources": outcome.removed_sources,
+                "reread": outcome.reread,
                 "warnings": outcome.warnings,
                 "skipped": outcome.sources.iter().flat_map(|r| r.skipped.clone()).collect::<Vec<_>>(),
             },

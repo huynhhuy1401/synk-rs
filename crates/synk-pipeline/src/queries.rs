@@ -114,9 +114,10 @@ fn parse_row(line: &str, docs: &[Document], normalized: &[String]) -> Result<Imp
             _ => Err(format!("\"{name}\" must be a non-empty string")),
         }
     };
-    let query = field("query")?.ok_or("missing \"query\"")?;
+    let nfc = synk_connectors::readers::nfc;
+    let query = nfc(&field("query")?.ok_or("missing \"query\"")?);
     let doc = field("doc")?;
-    let passage = field("text")?;
+    let passage = field("text")?.map(|p| nfc(&p));
     let doc = match (doc, &passage) {
         (Some(doc), _) => find_doc(&doc, docs)?,
         (None, Some(passage)) => {

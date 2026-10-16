@@ -55,6 +55,21 @@ pub mod reason {
     pub const EMPTY: &str = "empty";
 }
 
+/// Changes when the text synk gets from the same file changes, so the next
+/// sync reads every file again. 2: Unicode NFC.
+pub const READER_VERSION: u32 = 2;
+
+/// Unicode NFC: one code point for "ệ" rather than "e" plus two combining
+/// marks, however the file was typed or exported. The same Vietnamese word
+/// is then one word for chunking, caching and the model.
+pub fn nfc(text: &str) -> String {
+    use unicode_normalization::{UnicodeNormalization, is_nfc_quick};
+    match is_nfc_quick(text.chars()) {
+        unicode_normalization::IsNormalized::Yes => text.to_owned(),
+        _ => text.nfc().collect(),
+    }
+}
+
 /// `(title, normalized text)`, or a skip reason.
 pub fn read(path: &Path, bytes: &[u8]) -> Result<(String, String), &'static str> {
     let stem = || {
@@ -97,7 +112,8 @@ pub fn read(path: &Path, bytes: &[u8]) -> Result<(String, String), &'static str>
     if text.is_empty() {
         return Err(reason::EMPTY);
     }
-    Ok((title.filter(|t| !t.is_empty()).unwrap_or_else(stem), text))
+    let title = title.filter(|t| !t.is_empty()).unwrap_or_else(stem);
+    Ok((nfc(&title), nfc(&text)))
 }
 
 fn strip_front_matter(raw: &str) -> &str {

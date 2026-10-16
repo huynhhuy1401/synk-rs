@@ -1933,6 +1933,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "dunce",
+ "rusqlite",
  "serde",
  "serde_json",
  "synk-connectors",
@@ -1956,6 +1957,7 @@ dependencies = [
  "quick-xml",
  "synk-core",
  "tempfile",
+ "unicode-normalization",
  "zip",
 ]
 
@@ -1985,6 +1987,7 @@ dependencies = [
  "tempfile",
  "tokenizers",
  "toml",
+ "unicode-normalization",
  "ureq",
  "whatlang",
 ]
