@@ -1,0 +1,12 @@
+# llama.cpp's GGUF converter, shipped inside synk so `synk export --format
+# gguf` downloads nothing (ADR 0004). build.rs embeds every file in this
+# folder; export.rs writes them out once under SYNK_HOME.
+#
+# To update: copy convert_hf_to_gguf.py, conversion/ and gguf-py/ (without
+# tests/, examples/, __pycache__/) and LICENSE from the new commit, set
+# `commit` below and LLAMA_CPP_COMMIT in src/export.rs, then run the real
+# end-to-end test (it exports to GGUF and checks the vectors).
+source = "https://github.com/ggml-org/llama.cpp"
+commit = "711780ffc75bbc5645173ed8647a7b3f328c052a"
+license = "MIT"
+files = ["convert_hf_to_gguf.py", "conversion/", "gguf-py/", "LICENSE"]

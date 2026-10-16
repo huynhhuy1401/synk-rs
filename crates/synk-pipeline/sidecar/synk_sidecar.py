@@ -37,18 +37,41 @@ def emit(event, **fields):
     sys.stdout.flush()
 
 
+# Set when synk holds a lifeline: the process then ends with os._exit.
+LIFELINE = False
+
+
 def watch_lifeline():
     """synk keeps this process's stdin open while it runs. When synk is gone
     (Ctrl-C twice, killed, crashed), stdin closes and the trainer exits
-    instead of training on as an orphan."""
+    instead of training on as an orphan.
+
+    The pipe is moved off stdin first (stdin becomes the null device): on
+    Windows, a read pending on stdin makes other threads that touch it hang
+    (`import torch` does). A thread blocked inside sys.stdin would also hold
+    its lock, which Python's shutdown waits for, so the process ends with
+    os._exit."""
     import threading
+
+    global LIFELINE
+    LIFELINE = True
+    pipe = os.dup(0)
+    null = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(null, 0)
+    os.close(null)
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+
+        ctypes.windll.kernel32.SetStdHandle(-10, msvcrt.get_osfhandle(0))  # STD_INPUT_HANDLE
 
     def watch():
         try:
-            while sys.stdin.buffer.read(4096):
+            while os.read(pipe, 4096):
                 pass
-        finally:
-            os._exit(3)
+        except OSError:
+            pass
+        os._exit(3)
 
     threading.Thread(target=watch, daemon=True).start()
 
@@ -912,43 +935,6 @@ def general(req):
 
 # --- export ---------------------------------------------------------------
 
-LLAMA_CPP_FILES = ("convert_hf_to_gguf.py", "conversion/", "gguf-py/")
-
-
-def llama_cpp(commit, cache_dir):
-    """llama.cpp's converter at a pinned commit, downloaded once."""
-    import io
-    import tarfile
-    import urllib.request
-
-    root = os.path.join(cache_dir, f"llama.cpp-{commit[:12]}")
-    if os.path.isfile(os.path.join(root, "convert_hf_to_gguf.py")):
-        return root
-    url = f"https://codeload.github.com/ggml-org/llama.cpp/tar.gz/{commit}"
-    emit("log", message="Downloading llama.cpp's GGUF converter (once)")
-    try:
-        with urllib.request.urlopen(url, timeout=120) as r:
-            data = r.read()
-    except Exception as e:  # noqa: BLE001
-        raise SidecarError("DOWNLOAD_FAILED", f"couldn't download the GGUF converter: {e}") from e
-    tmp = root + ".tmp"
-    shutil.rmtree(tmp, ignore_errors=True)
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-        for member in tar.getmembers():
-            parts = member.name.split("/", 1)
-            if len(parts) < 2 or not member.isfile():
-                continue
-            rel = parts[1]
-            if any(rel == f or (f.endswith("/") and rel.startswith(f)) for f in LLAMA_CPP_FILES):
-                dest = os.path.join(tmp, rel)
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                with tar.extractfile(member) as src, open(dest, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-    shutil.rmtree(root, ignore_errors=True)
-    os.replace(tmp, root)
-    return root
-
-
 def gguf_source(model_dir, work):
     """A copy of the model the converter reads correctly. multilingual-e5
     models are BERT with an XLM-R tokenizer: labelled XLM-R, and without
@@ -1047,7 +1033,8 @@ def export(req):
     if fmt == "onnx":
         return export_onnx(reference_model, out, texts, reference)
     if fmt == "gguf":
-        root = llama_cpp(req["llama_cpp_commit"], req["cache_dir"])
+        # llama.cpp's converter, shipped inside synk and written out by it.
+        root = req["converter_dir"]
         work = os.path.join(out, ".synk-work")
         os.makedirs(work, exist_ok=True)
         source = gguf_source(src, work)
@@ -1058,7 +1045,9 @@ def export(req):
             # EmbeddingGemma: without this flag the Dense layers are dropped.
             cmd.append("--sentence-transformers-dense-modules")
         emit("log", message="Converting to GGUF")
-        env = dict(os.environ, PYTHONPATH=os.path.join(root, "gguf-py"))
+        # Offline: the converter has code paths that fetch from Hugging Face;
+        # an export must never download, so they fail instead.
+        env = dict(os.environ, PYTHONPATH=os.path.join(root, "gguf-py"), HF_HUB_OFFLINE="1")
         proc = subprocess.run(cmd, capture_output=True, text=True, env=env, encoding="utf-8", errors="replace")
         sys.stderr.write(proc.stdout + proc.stderr)
         shutil.rmtree(work, ignore_errors=True)
@@ -1110,4 +1099,10 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    code = main(sys.argv)
+    if LIFELINE:
+        # Skip interpreter shutdown, which would wait on the lifeline thread.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
+    sys.exit(code)

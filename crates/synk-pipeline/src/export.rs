@@ -21,7 +21,50 @@ use crate::sidecar::{PROTOCOL_VERSION, TrainerEnv, synk_home};
 use crate::train;
 
 /// llama.cpp's converter, at the commit synk's GGUF fixes were made for.
+/// Its files ship inside synk (`vendor/llama.cpp`, ADR 0004).
 pub const LLAMA_CPP_COMMIT: &str = "711780ffc75bbc5645173ed8647a7b3f328c052a";
+
+mod converter {
+    include!(concat!(env!("OUT_DIR"), "/converter_files.rs"));
+}
+
+/// Writes the shipped converter under SYNK_HOME once (a folder per content
+/// hash) and returns it. Nothing is downloaded.
+pub fn converter_dir() -> Result<PathBuf> {
+    converter_dir_in(&synk_home())
+}
+
+fn converter_dir_in(home: &Path) -> Result<PathBuf> {
+    let mut hasher = blake3::Hasher::new();
+    for (path, bytes) in converter::FILES {
+        hasher.update(path.as_bytes());
+        hasher.update(bytes);
+    }
+    let hash = hasher.finalize().to_hex();
+    let dir = home.join("converter").join(format!(
+        "llama.cpp-{}-{}",
+        &LLAMA_CPP_COMMIT[..12],
+        &hash[..8]
+    ));
+    let done = dir.join(".complete");
+    if done.is_file() {
+        return Ok(dir);
+    }
+    let tmp = dir.with_extension("tmp");
+    let _ = fs::remove_dir_all(&tmp);
+    for (path, bytes) in converter::FILES {
+        let dest = tmp.join(path);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| SynkError::io(parent.display(), e))?;
+        }
+        fs::write(&dest, bytes).map_err(|e| SynkError::io(dest.display(), e))?;
+    }
+    fs::write(tmp.join(".complete"), LLAMA_CPP_COMMIT)
+        .map_err(|e| SynkError::io(tmp.display(), e))?;
+    let _ = fs::remove_dir_all(&dir);
+    fs::rename(&tmp, &dir).map_err(|e| SynkError::io(dir.display(), e))?;
+    Ok(dir)
+}
 /// Texts embedded for the vector check.
 const CHECK_TEXTS: usize = 16;
 /// Lowest acceptable cosine between the original and the exported vectors.
@@ -231,8 +274,7 @@ pub fn export(
                 &json!({
                     "v": PROTOCOL_VERSION, "task": "export", "format": "gguf", "quant": quant,
                     "model_dir": model_dir, "out": out, "check_texts": check_texts(artifacts, run),
-                    "llama_cpp_commit": LLAMA_CPP_COMMIT,
-                    "cache_dir": synk_home(),
+                    "converter_dir": converter_dir()?,
                 }),
                 &run.key,
                 on_event,
@@ -426,4 +468,31 @@ fn ollama_delete(url: &str, name: &str) {
         .delete(&format!("{url}/api/delete"))
         .force_send_body()
         .send_json(json!({"model": name}));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_gguf_converter_ships_inside_synk() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = converter_dir_in(home.path()).unwrap();
+        for file in [
+            "convert_hf_to_gguf.py",
+            "gguf-py/gguf/__init__.py",
+            "LICENSE",
+        ] {
+            assert!(dir.join(file).is_file(), "{file} missing");
+        }
+        let version = fs::read_to_string(dir.join("VENDORED.toml")).unwrap();
+        assert!(
+            version.contains(LLAMA_CPP_COMMIT),
+            "VENDORED.toml names another commit"
+        );
+        // Written once, then reused.
+        fs::write(dir.join("marker"), "x").unwrap();
+        assert_eq!(converter_dir_in(home.path()).unwrap(), dir);
+        assert!(dir.join("marker").is_file());
+    }
 }
