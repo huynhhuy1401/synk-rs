@@ -7,9 +7,14 @@
 //! Everything is plain files, so it works the same on every OS:
 //! - IDs: `run:<n>-<label>`, `dataset:<n>-<label>`, `fetch:<n>`, with `n`
 //!   counting up per kind and never reused (`.synk/ops/seq.json`);
-//! - liveness: the running process rewrites `heartbeat_at` every few
-//!   seconds; one whose heartbeat is older than [`STALE_AFTER`] is
-//!   `interrupted` and its lock is free;
+//! - one at a time: the running process holds an OS lock on
+//!   `.synk/lock.held` for the operation's whole life, taken before a number
+//!   is handed out, so two commands started together can't both run;
+//! - liveness: a `running` record is alive while that lock is held. The OS
+//!   releases it the moment the process dies, so a killed operation reads
+//!   `interrupted` at once, and a sleeping machine keeps its lock. Records
+//!   written before the lock (no `liveness`) use the heartbeat:
+//!   older than [`STALE_AFTER`] is `interrupted`;
 //! - cancel: `synk cancel` creates `cancel` in the operation's folder; it is
 //!   checked between steps, and by the trainer at every training step.
 //!
@@ -17,7 +22,7 @@
 //! train artifact's key is stored in it once known.
 
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,8 +37,11 @@ use crate::artifact::Artifacts;
 
 /// How often a running operation rewrites its heartbeat.
 const HEARTBEAT: Duration = Duration::from_secs(5);
-/// A running operation whose heartbeat is older than this is dead.
+/// A running operation from before the OS lock whose heartbeat is older
+/// than this is dead.
 pub const STALE_AFTER: u64 = 120;
+/// `liveness` of records whose life is the OS lock on `.synk/lock.held`.
+const LIVENESS_LOCK: &str = "lock";
 /// Finished fetch and dataset records older than this many days are removed
 /// when a new operation starts. Run records are kept: they are the runs.
 const RETENTION_DAYS: u64 = 30;
@@ -187,6 +195,10 @@ pub struct OpRecord {
     /// and test results are this run's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub same_as: Option<String>,
+    /// How `running` is checked: `lock` (the OS lock on `.synk/lock.held`
+    /// is held); absent for records from before it (the heartbeat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<String>,
 }
 
 fn one() -> u32 {
@@ -194,15 +206,24 @@ fn one() -> u32 {
 }
 
 impl OpRecord {
-    /// A `running` record whose process stopped writing its heartbeat is
-    /// reported as `interrupted`.
-    fn settle(mut self) -> Self {
-        if self.state == State::Running && now().saturating_sub(self.heartbeat_at) > STALE_AFTER {
+    /// A `running` record whose process is gone is reported as
+    /// `interrupted`. `alive` says whether the OS lock is held for it.
+    fn settle(mut self, alive: bool) -> Self {
+        if self.state != State::Running {
+            return self;
+        }
+        let why = if self.liveness.as_deref() == Some(LIVENESS_LOCK) {
+            (!alive).then(|| "the process stopped".to_owned())
+        } else {
+            let silent = now().saturating_sub(self.heartbeat_at);
+            (silent > STALE_AFTER)
+                .then(|| format!("the process stopped (no heartbeat for {silent} s)"))
+        };
+        if let Some(why) = why {
             self.state = State::Interrupted;
             self.done = true;
             self.reason = Some(format!(
-                "the process stopped (no heartbeat for {} s); continue with: {}",
-                now().saturating_sub(self.heartbeat_at),
+                "{why}; continue with: {}",
                 self.kind.continue_command(&self.id)
             ));
         }
@@ -244,8 +265,54 @@ impl Ops {
         self.data_dir.join("ops")
     }
 
+    /// Names the running operation (for people and `running()`).
     fn lock_path(&self) -> PathBuf {
         self.data_dir.join("lock")
+    }
+
+    /// Held with an OS lock while an operation runs.
+    fn held_path(&self) -> PathBuf {
+        self.data_dir.join("lock.held")
+    }
+
+    /// Takes the project's OS lock, or `None` when another process (or
+    /// another operation in this one) holds it. A checker holds it for a
+    /// moment too, so a busy lock is retried briefly.
+    fn try_hold(&self) -> Result<Option<File>> {
+        let path = self.held_path();
+        fs::create_dir_all(&self.data_dir)
+            .map_err(|e| SynkError::io(self.data_dir.display(), e))?;
+        for attempt in 0..10 {
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .map_err(|e| SynkError::io(path.display(), e))?;
+            match file.try_lock() {
+                Ok(()) => return Ok(Some(file)),
+                Err(fs::TryLockError::WouldBlock) if attempt < 9 => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(fs::TryLockError::WouldBlock) => return Ok(None),
+                Err(fs::TryLockError::Error(e)) => return Err(SynkError::io(path.display(), e)),
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether some process holds the OS lock now. Never waits.
+    fn lock_held(&self) -> bool {
+        let Ok(file) = OpenOptions::new().write(true).open(self.held_path()) else {
+            return false;
+        };
+        matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock))
+    }
+
+    /// Whether the operation `id` is the one holding the lock.
+    fn alive(&self, id: &str) -> bool {
+        let named = fs::read_to_string(self.lock_path()).is_ok_and(|n| n.trim() == id);
+        named && self.lock_held()
     }
 
     fn seq_path(&self) -> PathBuf {
@@ -265,9 +332,9 @@ impl Ops {
 
     fn read(&self, dir: &Path) -> Option<OpRecord> {
         let text = fs::read_to_string(dir.join("op.json")).ok()?;
-        serde_json::from_str::<OpRecord>(&text)
-            .ok()
-            .map(OpRecord::settle)
+        let record = serde_json::from_str::<OpRecord>(&text).ok()?;
+        let alive = record.state == State::Running && self.alive(&record.id);
+        Some(record.settle(alive))
     }
 
     /// Every operation, newest first.
@@ -458,25 +525,44 @@ impl Ops {
         Ok((events, more))
     }
 
-    fn check_free(&self) -> Result<()> {
-        if let Some(running) = self.running()? {
-            return Err(SynkError::new(
-                ErrorCode::JobRunning,
-                format!(
-                    "{} is already running in this project (started {} s ago)",
-                    running.id,
-                    now().saturating_sub(running.started_at)
-                ),
-            )
-            .with_next("synk wait")
-            .with_details(json!({ "running": running.id })));
+    /// Takes the project's lock for a new operation, or fails with
+    /// `JOB_RUNNING`. Taking it is atomic, so of two commands started
+    /// together exactly one gets it.
+    fn take_lock(&self) -> Result<File> {
+        // A process from before the OS lock only has a heartbeat.
+        let legacy = self.running()?.filter(|r| r.liveness.is_none());
+        let held = match legacy {
+            Some(_) => None,
+            None => self.try_hold()?,
+        };
+        if let Some(file) = held {
+            return Ok(file);
         }
-        Ok(())
+        let running = self.running()?;
+        let (id, started) = running
+            .as_ref()
+            .map_or(("another operation", 0), |r| (r.id.as_str(), r.started_at));
+        let mut err = SynkError::new(
+            ErrorCode::JobRunning,
+            if started > 0 {
+                format!(
+                    "{id} is already running in this project (started {} s ago)",
+                    now().saturating_sub(started)
+                )
+            } else {
+                format!("{id} is already running in this project")
+            },
+        )
+        .with_next("synk wait");
+        if let Some(r) = &running {
+            err = err.with_details(json!({ "running": r.id }));
+        }
+        Err(err)
     }
 
     /// Starts a new operation, taking the project's lock.
     pub fn start(&self, new: NewOp<'_>) -> Result<Op> {
-        self.check_free()?;
+        let held = self.take_lock()?;
         if let Some(name) = new.name {
             let taken = self
                 .list_kind(OpKind::Run)?
@@ -534,13 +620,14 @@ impl Ops {
             error: None,
             reason: None,
             same_as: None,
+            liveness: Some(LIVENESS_LOCK.to_owned()),
         };
-        self.begin(record, 0)
+        self.begin(record, 0, held)
     }
 
     /// Continues an unfinished operation under the same ID.
     pub fn resume(&self, mut record: OpRecord) -> Result<Op> {
-        self.check_free()?;
+        let held = self.take_lock()?;
         let dir = self.dir(&record.id);
         let _ = fs::remove_file(dir.join("cancel"));
         let seq =
@@ -556,10 +643,11 @@ impl Ops {
         record.result = None;
         record.error = None;
         record.reason = None;
-        self.begin(record, seq)
+        record.liveness = Some(LIVENESS_LOCK.to_owned());
+        self.begin(record, seq, held)
     }
 
-    fn begin(&self, record: OpRecord, seq: u64) -> Result<Op> {
+    fn begin(&self, record: OpRecord, seq: u64, held: File) -> Result<Op> {
         let dir = self.dir(&record.id);
         fs::create_dir_all(&dir).map_err(|e| SynkError::io(dir.display(), e))?;
         write_record(&dir, &record)?;
@@ -584,6 +672,7 @@ impl Ops {
         Ok(Op {
             dir,
             lock,
+            held: Some(held),
             record: shared,
             stop,
             heartbeat: Some(heartbeat),
@@ -651,6 +740,7 @@ impl Ops {
                 error: None,
                 reason: Some("made before runs had numbers".to_owned()),
                 same_as: None,
+                liveness: None,
             };
             let dir = self.dir(&record.id);
             fs::create_dir_all(&dir).map_err(|e| SynkError::io(dir.display(), e))?;
@@ -696,6 +786,8 @@ fn write_record(dir: &Path, record: &OpRecord) -> Result<()> {
 pub struct Op {
     dir: PathBuf,
     lock: PathBuf,
+    /// The OS lock on `.synk/lock.held`; released when dropped.
+    held: Option<File>,
     record: Arc<Mutex<OpRecord>>,
     stop: Arc<AtomicBool>,
     heartbeat: Option<std::thread::JoinHandle<()>>,
@@ -822,6 +914,7 @@ impl Op {
             let _ = handle.join();
         }
         let _ = fs::remove_file(&self.lock);
+        self.held = None;
     }
 }
 
@@ -916,18 +1009,26 @@ mod tests {
         assert_eq!(ops.get(None).unwrap().id, "fetch:1");
     }
 
+    /// What a killed process leaves: the record says `running`, the name
+    /// file stays, and the OS has released the lock.
+    fn kill(mut op: Op) {
+        op.stop.store(true, Ordering::Relaxed);
+        op.heartbeat.take().unwrap().join().unwrap();
+        op.held = None;
+        std::mem::forget(op);
+    }
+
     #[test]
-    fn a_stale_heartbeat_reads_as_interrupted_and_resumes() {
+    fn a_killed_operation_reads_as_interrupted_at_once_and_resumes() {
         let dir = tempfile::tempdir().unwrap();
         let ops = Ops::new(dir.path().to_path_buf());
         let mut op = ops.start(new_run("e5-small", None)).unwrap();
         op.event("train", &json!({"event": "log", "message": "x"}));
         let id = op.id();
-        // Simulate a killed process: stop the heartbeat, then age the record.
-        op.stop.store(true, Ordering::Relaxed);
-        op.heartbeat.take().unwrap().join().unwrap();
+        // Alive while the lock is held, however old the heartbeat.
         op.update(|r| r.heartbeat_at = now() - STALE_AFTER - 10);
-        std::mem::forget(op);
+        assert_eq!(ops.get(Some(&id)).unwrap().state, State::Running);
+        kill(op);
         let read = ops.get(Some(&id)).unwrap();
         assert_eq!(read.state, State::Interrupted);
         assert!(read.unfinished());
@@ -939,6 +1040,54 @@ mod tests {
         assert_eq!((record.id.as_str(), record.attempt), (id.as_str(), 2));
         let (events, _) = ops.events(&id, 0, 10).unwrap();
         assert_eq!(events[1]["seq"], 2, "numbering continues");
+    }
+
+    #[test]
+    fn records_from_before_the_lock_use_the_heartbeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Ops::new(dir.path().to_path_buf());
+        let op = ops.start(new_run("e5-small", None)).unwrap();
+        let id = op.id();
+        op.update(|r| r.liveness = None);
+        kill(op);
+        // A v0.1 process may still be running: fresh heartbeat, no lock.
+        assert_eq!(ops.get(Some(&id)).unwrap().state, State::Running);
+        assert_eq!(
+            ops.start(new_run("x", None)).err().unwrap().code,
+            ErrorCode::JobRunning
+        );
+        let path = ops.dir(&id).join("op.json");
+        let mut record: OpRecord = read_json(&path).unwrap();
+        record.heartbeat_at = now() - STALE_AFTER - 10;
+        write_json(&path, &record).unwrap();
+        assert_eq!(ops.get(Some(&id)).unwrap().state, State::Interrupted);
+    }
+
+    #[test]
+    fn of_two_operations_started_together_exactly_one_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let (data, barrier) = (data.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let ops = Ops::new(data);
+                    barrier.wait();
+                    let started = ops.start(new_run("e5-small", None));
+                    // Hold it long enough for the other to try.
+                    std::thread::sleep(Duration::from_millis(400));
+                    started.map(|op| op.finish(Ok(Value::Null)).id)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(ok, 1, "{results:?}");
+        let err = results.into_iter().find_map(|r| r.err()).unwrap();
+        assert_eq!(err.code, ErrorCode::JobRunning);
+        // The loser took no number.
+        assert_eq!(Ops::new(data).list_kind(OpKind::Run).unwrap().len(), 1);
     }
 
     #[test]
