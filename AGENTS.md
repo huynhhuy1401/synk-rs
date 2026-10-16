@@ -93,8 +93,10 @@ SYNK_E2E_PYTHON=<python with torch + sentence-transformers> cargo test -- --igno
   `work.rs` (train, dataset, fetch, wait, logs, cancel), `commands.rs`
   (sources, status),
   `config_cmd.rs`, `pipeline.rs` (setup, models, export, progress), `views.rs`
-  (queries, `run ...`), `reference.rs` (`schema`, `skill`; `skill/SKILL.md`),
+  (queries, `run ...`), `reference.rs` (`schema`, `skill`),
   `human.rs`, `config.rs`, `output.rs`
+- `skills/synk/SKILL.md` — the agent skill for *using* synk; `reference.rs`
+  embeds it, `synk skill` emits it (with generated `references/codes.md`)
 - `docs/plans/` — accepted plans (`v1-design.md` predates ADR 0002; read it
   through that ADR)
 
@@ -107,6 +109,13 @@ Issues are tracked in GitHub Issues via the `gh` CLI. See `docs/agents/issue-tra
 ### Triage labels
 
 Uses the five default triage labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Driving synk
+
+`skills/synk/SKILL.md` — the recipe for *using* the synk CLI as a user
+would: the train loop, consent, reading results. Reach it when a task runs
+synk commands (it is what `synk skill` emits into user projects), not when
+changing synk's code.
 
 ### Domain docs
 

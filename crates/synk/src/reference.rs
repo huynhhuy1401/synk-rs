@@ -13,7 +13,7 @@ use synk_pipeline::advice;
 
 use crate::output::{CONTRACT_VERSION, Output};
 
-const SKILL: &str = include_str!("../skill/SKILL.md");
+const SKILL: &str = include_str!("../../../skills/synk/SKILL.md");
 
 /// Describes one command: its arguments and subcommands.
 fn describe(cmd: &clap::Command) -> Value {
