@@ -19,7 +19,9 @@ fn command(dir: &Path, extra: &[(&str, &str)]) -> Command {
         .env("SYNK_FAKE_TRAINER", "1")
         .env_remove("SYNK_FAKE_TRAINER_SLOW")
         .env_remove("SYNK_FAKE_TRAINER_STUCK")
-        .env_remove("SYNK_TEST_INTERRUPT_AFTER_MS");
+        .env_remove("SYNK_TEST_INTERRUPT_AFTER_MS")
+        .env_remove("SYNK_TEST_FREE_BYTES")
+        .env_remove("SYNK_DISK_CHECK");
     for (k, v) in extra {
         cmd.env(k, v);
     }
@@ -1011,6 +1013,56 @@ fn a_template_of_searches_imports_and_style_examples_stay_fixed() {
     // --restyle chooses again.
     let restyled = synk(root, &["queries", "import", "more.jsonl", "--restyle"]);
     assert_eq!(restyled["data"]["restyled"], true);
+}
+
+#[test]
+fn the_dry_run_checks_free_disk_space() {
+    let dir = synced_project();
+    let root = dir.path();
+    with_generator_and_tiny_model(root, &fake_llm());
+    // 4 KB of weights: about 1,000 parameters, so training writes ~20 KB.
+    fs::write(root.join("tiny-model/model.safetensors"), vec![0u8; 4000]).unwrap();
+    let train_args = ["train", "--dry-run"];
+
+    let plenty = synk_env(
+        root,
+        &train_args,
+        &[("SYNK_TEST_FREE_BYTES", "100000000000")],
+    );
+    assert!(
+        plenty["data"]["blockers"].as_array().unwrap().is_empty(),
+        "{plenty}"
+    );
+    let disk = &plenty["data"]["disk"][0];
+    assert_eq!(disk["need_bytes"], 20_000, "{plenty}");
+    assert_eq!(disk["needs"][0]["what"], "training checkpoints and models");
+
+    let full = synk_env(root, &train_args, &[("SYNK_TEST_FREE_BYTES", "1000")]);
+    let blocker = &full["data"]["blockers"][0];
+    assert_eq!(blocker["code"], "INSUFFICIENT_DISK", "{full}");
+    assert_eq!(blocker["class"], "resource");
+    // Running refuses before anything starts.
+    let run = synk_env(root, &["train"], &[("SYNK_TEST_FREE_BYTES", "1000")]);
+    assert_eq!(error_code(&run), "INSUFFICIENT_DISK", "{run}");
+
+    // The escape hatch turns it into a warning.
+    let warned = synk_env(
+        root,
+        &train_args,
+        &[
+            ("SYNK_TEST_FREE_BYTES", "1000"),
+            ("SYNK_DISK_CHECK", "warn"),
+        ],
+    );
+    assert!(warned["data"]["blockers"].as_array().unwrap().is_empty());
+    assert!(
+        warned["data"]["advice"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["code"] == "DISK_SPACE_TIGHT"),
+        "{warned}"
+    );
 }
 
 #[test]

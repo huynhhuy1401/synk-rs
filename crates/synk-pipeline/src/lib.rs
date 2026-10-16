@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod chunk;
 pub mod config;
 pub mod dataset;
+pub mod disk;
 pub mod exec;
 pub mod export;
 pub mod fake_trainer;

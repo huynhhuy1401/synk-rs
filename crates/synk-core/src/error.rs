@@ -326,7 +326,22 @@ impl SynkError {
         self
     }
 
+    /// A filesystem error. A full disk (or quota) is `INSUFFICIENT_DISK`,
+    /// so the fix is clear.
     pub fn io(context: impl fmt::Display, err: std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        if matches!(
+            err.kind(),
+            ErrorKind::StorageFull | ErrorKind::QuotaExceeded
+        ) {
+            return Self::new(
+                ErrorCode::InsufficientDisk,
+                format!("the disk is full: {context}: {err}"),
+            )
+            .with_hint(
+                "free some space, then run the same command again; finished steps are kept",
+            );
+        }
         Self::new(ErrorCode::Io, format!("{context}: {err}"))
     }
 }

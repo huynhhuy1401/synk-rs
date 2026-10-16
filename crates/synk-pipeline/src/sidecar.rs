@@ -278,6 +278,7 @@ fn sidecar_error(event: &Value, log_path: &Path) -> SynkError {
         Some("DOWNLOAD_FAILED") => ErrorCode::DownloadFailed,
         Some("EXPORT_CHECK_FAILED") => ErrorCode::ExportCheckFailed,
         Some("EXPORT_UNSUPPORTED") => ErrorCode::ExportUnsupported,
+        Some("INSUFFICIENT_DISK") => ErrorCode::InsufficientDisk,
         _ => ErrorCode::SidecarFailed,
     };
     let err = SynkError::new(code, message);

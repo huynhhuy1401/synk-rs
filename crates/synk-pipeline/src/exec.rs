@@ -215,6 +215,7 @@ pub fn run(
                 out.dataset = Some((id, outcome.manifest));
             }
             Step::Train => {
+                graph::check_training_space(ws, &preview.model)?;
                 let artifacts = ws.artifacts();
                 let Some((_, dataset)) = out.dataset.clone() else {
                     return Err(SynkError::new(

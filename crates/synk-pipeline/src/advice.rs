@@ -60,6 +60,10 @@ pub const CODES: &[(&str, &str)] = &[
         "The export target doesn't add the model's query/document prefixes",
     ),
     (
+        "DISK_SPACE_TIGHT",
+        "Less than 2 GB would be left on a drive the run writes to",
+    ),
+    (
         "REAL_QUERIES_FEW_DOCUMENTS",
         "The real searches cover too few documents to decide the verdict",
     ),
@@ -101,6 +105,30 @@ const MAX_TRUNCATED_SHARE: f64 = 0.05;
 const MAX_QUERIES_PER_CHUNK: u64 = 8;
 const ADD_DOCUMENTS: &str = "synk source add <path> && synk train --dry-run";
 const WRITE_SEARCHES: &str = "synk queries template --out searches.jsonl";
+/// A drive the run writes to would be nearly full (or is too small, with
+/// `SYNK_DISK_CHECK=warn`).
+pub fn disk_tight(volume: &crate::disk::Volume) -> Advice {
+    let gb = |b: u64| format!("{:.1} GB", b as f64 / 1e9);
+    Advice {
+        code: "DISK_SPACE_TIGHT",
+        severity: Severity::Warning,
+        message: format!(
+            "The run writes about {} to the drive of {}, which has {} free{}. Free some space first, or the run may stop halfway.",
+            gb(volume.need_bytes),
+            volume.path.display(),
+            gb(volume.free_bytes),
+            if volume.short() {
+                " (not enough; SYNK_DISK_CHECK=warn let it through)"
+            } else {
+                ""
+            }
+        ),
+        evidence: serde_json::to_value(volume).expect("volume serializes"),
+        action: None,
+        applicability: Applicability::Manual,
+    }
+}
+
 /// Spread of per-document changes assumed before a run has measured one.
 pub const DEFAULT_DOCUMENT_SD: f64 = 0.10;
 

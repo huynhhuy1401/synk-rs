@@ -270,6 +270,13 @@ builds and fetches in `.synk/ops/`. Shared environments, model
 weights and speed history live in `$SYNK_HOME` (default
 `%LOCALAPPDATA%\synk` / `~/.local/share/synk`) and the Hugging Face cache.
 
+**Disk space.** `train --dry-run` lists what the run will write on each drive
+(`data.disk`: downloads, and training checkpoints, about 20 bytes per
+parameter for full fine-tuning, 8 for LoRA) against the space free there, and
+blocks with `INSUFFICIENT_DISK` when it won't fit. The sizes are estimates;
+if one is wrong for you, `SYNK_DISK_CHECK=warn` turns the block into a
+warning.
+
 ## For agents
 
 Load the skill: `synk skill --out .claude/skills/synk` (or wherever your
@@ -346,6 +353,7 @@ a better result: `code`, `severity`, `message`, `evidence`, `action`
 | `LANG_REGRESSION` | One language got worse |
 | `GENERAL_REGRESSION` | The general check got clearly worse (≥0.02) |
 | `PREFIX_DROPPED_BY_TARGET` | The export target won't add the model's prefixes |
+| `DISK_SPACE_TIGHT` | Less than 2 GB would be left on a drive the run writes to (or too little, with `SYNK_DISK_CHECK=warn`) |
 | `REAL_QUERIES_FEW_DOCUMENTS` | Real searches exist but are under 30, or about under 10 documents, so they don't decide yet |
 | `SYNTHETIC_REAL_DISAGREE` | Generated test queries and real searches reach different verdicts |
 
@@ -368,6 +376,7 @@ a better result: `code`, `severity`, `message`, `evidence`, `action`
 | `DOWNLOAD_FAILED` | A download failed after retries |
 | `DEVICE_UNSUPPORTED` | No PyTorch build or device for the requested backend |
 | `OUT_OF_MEMORY` | Training ran out of memory; `actions` suggest a smaller batch or LoRA |
+| `INSUFFICIENT_DISK` | A drive the run writes to lacks space (a `train --dry-run` blocker with `details` per drive), or filled up during the run |
 | `DATASET_NOT_FOUND` / `DATASET_TOO_SMALL` | No dataset; too few documents or queries |
 | `RUN_INCOMPLETE` / `RUN_NOT_FOUND` / `RUNS_NOT_COMPARABLE` | Run lookups and comparisons |
 | `QUERIES_INVALID` | `queries import`: a bad line; nothing was imported |

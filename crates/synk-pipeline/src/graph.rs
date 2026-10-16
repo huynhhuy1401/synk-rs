@@ -273,6 +273,9 @@ pub struct Preview {
     /// verdict (`TEST_SET_UNDERPOWERED` with `evidence.predicted`).
     #[serde(default, skip_deserializing)]
     pub advice: Vec<crate::advice::Advice>,
+    /// Free space against what the run will write, per drive.
+    #[serde(default, skip_deserializing)]
+    pub disk: Vec<crate::disk::Volume>,
 }
 
 impl Preview {
@@ -1062,6 +1065,15 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
     }
     b.steps.sort_by_key(|s| s.step);
 
+    let disk = disk_needs(ws, &model, &b.consent, &b.steps);
+    for volume in &disk {
+        if volume.short() && std::env::var("SYNK_DISK_CHECK").as_deref() != Ok("warn") {
+            b.blockers.push(insufficient_disk(volume));
+        } else if volume.short() || volume.tight() {
+            advice.push(crate::advice::disk_tight(volume));
+        }
+    }
+
     let download_bytes: u64 = b.consent.iter().filter_map(|c| c.bytes).sum();
     let est_seconds: u64 = b.steps.iter().filter_map(|s| s.est_seconds).sum();
     let preview = Preview {
@@ -1083,8 +1095,118 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
         dataset_key,
         run_key,
         advice,
+        disk,
     };
     Ok(preview)
+}
+
+/// What the run will write, where: downloads (the trainer grows when
+/// installed) and, when training runs, its checkpoints and models.
+fn disk_needs(
+    ws: &Workspace,
+    model: &ModelSpec,
+    consent: &[Consent],
+    steps: &[StepPlan],
+) -> Vec<crate::disk::Volume> {
+    use crate::disk::{self, Need};
+    let mut needs = Vec::new();
+    let local_llm = ws.cfg.generator.base_url.contains("localhost")
+        || ws.cfg.generator.base_url.contains("127.0.0.1");
+    for c in consent.iter().filter(|c| c.kind == "download") {
+        let (Some(name), Some(bytes)) = (c.name.as_deref(), c.bytes) else {
+            continue;
+        };
+        let place = if name == "trainer" {
+            Some((sidecar::synk_home(), bytes * disk::TRAINER_UNPACKED))
+        } else if name.starts_with("ollama:") {
+            local_llm
+                .then(disk::ollama_models_dir)
+                .flatten()
+                .map(|d| (d, bytes))
+        } else {
+            hub::cache_dir().map(|d| (d, bytes))
+        };
+        if let Some((path, bytes)) = place {
+            needs.push(Need {
+                what: c.what.clone(),
+                path,
+                bytes,
+            });
+        }
+    }
+    let trains = steps
+        .iter()
+        .any(|s| s.step == Step::Train && s.action == Action::Run);
+    if trains {
+        needs.extend(training_need(ws, model));
+    }
+    disk::check(needs)
+}
+
+/// What training writes: checkpoints and models, from the model's parameter
+/// count: the catalog's, or a local folder's weight files at 4 bytes per
+/// parameter (unknown for other custom models).
+pub fn training_need(ws: &Workspace, model: &ModelSpec) -> Option<crate::disk::Need> {
+    let catalog = model
+        .catalog_id
+        .as_deref()
+        .and_then(|id| catalog::models().into_iter().find(|m| m.id == id))
+        .and_then(|m| crate::disk::parse_parameters(&m.parameters));
+    let parameters = catalog.or_else(|| {
+        let weights: u64 = fs::read_dir(&model.name_or_path)
+            .ok()?
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_lowercase();
+                name.ends_with(".safetensors") || name.ends_with(".bin")
+            })
+            .filter_map(|e| e.metadata().ok())
+            .map(|m| m.len())
+            .sum();
+        (weights > 0).then_some(weights / 4)
+    })?;
+    Some(crate::disk::Need {
+        what: "training checkpoints and models".to_owned(),
+        path: ws.data_dir.join("artifacts"),
+        bytes: crate::disk::training_bytes(parameters, &ws.cfg.trainer.finetune),
+    })
+}
+
+/// Before training starts (the dataset step may have taken hours): fails
+/// with `INSUFFICIENT_DISK` if its checkpoints won't fit.
+pub fn check_training_space(ws: &Workspace, model: &ModelSpec) -> Result<()> {
+    if std::env::var("SYNK_DISK_CHECK").as_deref() == Ok("warn") {
+        return Ok(());
+    }
+    let volumes = crate::disk::check(training_need(ws, model).into_iter().collect());
+    match volumes.iter().find(|v| v.short()) {
+        Some(v) => Err(insufficient_disk(v)),
+        None => Ok(()),
+    }
+}
+
+fn insufficient_disk(volume: &crate::disk::Volume) -> SynkError {
+    let gb = |b: u64| format!("{:.1} GB", b as f64 / 1e9);
+    let what: Vec<String> = volume
+        .needs
+        .iter()
+        .map(|n| format!("{} ({})", n.what, gb(n.bytes)))
+        .collect();
+    SynkError::new(
+        ErrorCode::InsufficientDisk,
+        format!(
+            "not enough disk space on the drive of {}: the run needs about {} ({}) and {} is free",
+            volume.path.display(),
+            gb(volume.need_bytes),
+            what.join(", "),
+            gb(volume.free_bytes)
+        ),
+    )
+    .with_hint(format!(
+        "free about {} there, or set SYNK_DISK_CHECK=warn if this estimate is wrong for you",
+        gb(volume.need_bytes - volume.free_bytes)
+    ))
+    .with_details(serde_json::to_value(volume).expect("volume serializes"))
 }
 
 /// The spread of per-document changes measured by the project's latest

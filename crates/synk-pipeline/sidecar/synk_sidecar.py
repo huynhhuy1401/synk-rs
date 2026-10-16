@@ -1091,6 +1091,13 @@ def main(argv):
         emit("error", code="CANCELLED", message="the trainer was interrupted")
         return 1
     except Exception as e:  # noqa: BLE001 - report every crash as an event
+        import errno
+
+        # A full disk, however PyTorch words it, is something the user can fix.
+        full = isinstance(e, OSError) and e.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", -1))
+        if full or "No space left on device" in str(e) or "file write failed" in str(e):
+            emit("error", code="INSUFFICIENT_DISK", message=f"the disk is full: {e}")
+            return 1
         import traceback
 
         traceback.print_exc()
