@@ -23,6 +23,10 @@ SYNK_E2E_PYTHON=<python with torch + sentence-transformers> cargo test -- --igno
   `git tag vX.Y.Z && git push origin vX.Y.Z`. The tag builds the binaries
   and installers and publishes a GitHub release. Only tags run it, not PRs.
 - GPUs aren't in CI; test CUDA by hand on a cloud GPU before a release.
+- The trainer's Python packages are pinned with hashes in
+  `crates/synk-pipeline/locks/` (one file per backend and platform). After
+  changing `locks/requirements.in` (or the versions in `sidecar.rs`), run
+  `scripts/lock-trainer.sh`, then a real `synk setup`.
 
 ## Commits
 

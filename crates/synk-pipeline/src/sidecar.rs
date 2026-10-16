@@ -36,6 +36,41 @@ const EXTRAS: &[&str] = &[
 ];
 const EXCLUDE_NEWER: &str = "2026-10-14T00:00:00Z";
 
+/// Every package of the environment, pinned with hashes, per backend and
+/// platform (`scripts/lock-trainer.sh` writes them from the versions
+/// above). Installing from one resolves nothing on the user's machine, so
+/// every install is the same, byte for byte.
+const LOCKS: &[(&str, &str)] = &[
+    ("cpu-windows-x86_64", include_str!("../locks/cpu-windows-x86_64.txt")),
+    ("cpu-linux-x86_64", include_str!("../locks/cpu-linux-x86_64.txt")),
+    ("cpu-linux-aarch64", include_str!("../locks/cpu-linux-aarch64.txt")),
+    ("cpu-macos-aarch64", include_str!("../locks/cpu-macos-aarch64.txt")),
+    ("cuda-windows-x86_64", include_str!("../locks/cuda-windows-x86_64.txt")),
+    ("cuda-linux-x86_64", include_str!("../locks/cuda-linux-x86_64.txt")),
+];
+
+/// The lock file for `backend` on this platform, if synk ships one.
+fn lock_file(backend: Backend) -> Option<&'static str> {
+    let os = if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        return None;
+    };
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        return None;
+    };
+    let name = format!("{}-{os}-{arch}", backend.as_str());
+    LOCKS.iter().find(|(n, _)| *n == name).map(|(_, text)| *text)
+}
+
 /// Where synk keeps environments shared by all projects: `$SYNK_HOME`, or the
 /// platform's local data directory.
 pub fn synk_home() -> PathBuf {
@@ -406,10 +441,14 @@ pub fn setup(
         None => detect_backend(),
     };
     let index = backend.torch_index()?;
-    let recipe = format!(
-        "{PYTHON_VERSION}|{TORCH}|{SENTENCE_TRANSFORMERS}|{}|{EXCLUDE_NEWER}|{index:?}",
-        EXTRAS.join(",")
-    );
+    let lock = lock_file(backend);
+    let recipe = match lock {
+        Some(text) => format!("{PYTHON_VERSION}|lock|{}", blake3::hash(text.as_bytes()).to_hex()),
+        None => format!(
+            "{PYTHON_VERSION}|{TORCH}|{SENTENCE_TRANSFORMERS}|{}|{EXCLUDE_NEWER}|{index:?}",
+            EXTRAS.join(",")
+        ),
+    };
     let env_name = format!(
         "{}-{}",
         backend.as_str(),
@@ -449,25 +488,46 @@ pub fn setup(
         )?;
         let python_arg = python.to_string_lossy();
         log(&format!(
-            "Installing PyTorch ({}); this downloads several hundred MB to a few GB",
+            "Installing PyTorch ({}), sentence-transformers, PEFT and the GGUF writer; this downloads several hundred MB to a few GB",
             backend.as_str()
         ));
-        let mut torch = vec!["pip", "install", "--python", &python_arg, TORCH];
-        if let Some(index) = index {
-            torch.extend(["--index-url", index]);
+        if let Some(text) = lock {
+            let lock_path = env_dir.join("synk-lock.txt");
+            fs::write(&lock_path, text).map_err(|e| SynkError::io(lock_path.display(), e))?;
+            let lock_arg = lock_path.to_string_lossy();
+            uv_run(
+                &uv,
+                &[
+                    "pip",
+                    "install",
+                    "--python",
+                    &python_arg,
+                    "--require-hashes",
+                    "--no-deps",
+                    "--index-strategy",
+                    "unsafe-best-match",
+                    "-r",
+                    &lock_arg,
+                ],
+            )?;
+        } else {
+            // No lock for this platform: resolve, capped at a date.
+            let mut torch = vec!["pip", "install", "--python", &python_arg, TORCH];
+            if let Some(index) = index {
+                torch.extend(["--index-url", index]);
+            }
+            uv_run(&uv, &torch)?;
+            let mut packages = vec![
+                "pip",
+                "install",
+                "--python",
+                &python_arg,
+                SENTENCE_TRANSFORMERS,
+            ];
+            packages.extend(EXTRAS);
+            packages.extend(["--exclude-newer", EXCLUDE_NEWER]);
+            uv_run(&uv, &packages)?;
         }
-        uv_run(&uv, &torch)?;
-        log("Installing sentence-transformers, PEFT and the GGUF writer");
-        let mut packages = vec![
-            "pip",
-            "install",
-            "--python",
-            &python_arg,
-            SENTENCE_TRANSFORMERS,
-        ];
-        packages.extend(EXTRAS);
-        packages.extend(["--exclude-newer", EXCLUDE_NEWER]);
-        uv_run(&uv, &packages)?;
     }
 
     log("Checking the environment");

@@ -1,0 +1,10 @@
+# The trainer environment. Pinned per platform by scripts/lock-trainer.sh.
+torch==2.14.1
+sentence-transformers[train]==6.1.0
+peft
+onnx
+onnxscript
+onnxruntime
+gguf
+sentencepiece
+protobuf
