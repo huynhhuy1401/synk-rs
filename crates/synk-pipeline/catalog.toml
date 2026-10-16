@@ -1,0 +1,92 @@
+# synk model catalog: base models synk has tested and ships settings for.
+#
+# Each entry pins an exact Hugging Face commit, so a catalog model always
+# downloads the same weights. Prompts are prepended to queries and documents
+# before embedding; they must match what the model was trained with.
+# Field changes within catalog_version 1 are additive only.
+
+catalog_version = 1
+
+[[models]]
+id = "multilingual-e5-small"
+hf = "intfloat/multilingual-e5-small"
+revision = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
+query_prompt = "query: "
+document_prompt = "passage: "
+dims = 384
+parameters = "118M"
+languages = "~100 languages"
+notes = "Default. Small enough to fine-tune on a CPU."
+ollama = []
+
+[[models]]
+id = "multilingual-e5-base"
+hf = "intfloat/multilingual-e5-base"
+revision = "d128750597153bb5987e10b1c3493a34e5a4502a"
+query_prompt = "query: "
+document_prompt = "passage: "
+dims = 768
+parameters = "278M"
+languages = "~100 languages"
+notes = "Better quality than small. CPU training works but is slow; a GPU helps."
+ollama = []
+
+[[models]]
+id = "qwen3-embedding-0.6b"
+hf = "Qwen/Qwen3-Embedding-0.6B"
+revision = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+query_prompt = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:"
+document_prompt = ""
+dims = 1024
+parameters = "0.6B"
+languages = "100+ languages"
+notes = "Strong multilingual model. Trained with LoRA by default; a GPU is strongly recommended."
+ollama = ["qwen3-embedding:0.6b"]
+mrl_dims = [1024, 512, 256, 128]
+
+[[models]]
+id = "bge-m3"
+hf = "BAAI/bge-m3"
+revision = "5617a9f61b028005a4858fdac845db406aefb181"
+query_prompt = ""
+document_prompt = ""
+dims = 1024
+parameters = "568M"
+languages = "100+ languages (tested on Vietnamese in its paper)"
+notes = "Strong multilingual model with long inputs (8192 tokens). Trained with LoRA by default; needs a GPU."
+ollama = ["bge-m3"]
+
+[[models]]
+id = "embeddinggemma-300m"
+hf = "google/embeddinggemma-300m"
+revision = "57c266a740f537b4dc058e1b0cda161fd15afa75"
+query_prompt = "task: search result | query: "
+document_prompt = "title: none | text: "
+dims = 768
+parameters = "308M"
+languages = "100+ languages"
+notes = "Gated: accept Google's terms on Hugging Face and set HF_TOKEN first. Trained with LoRA by default."
+ollama = ["embeddinggemma"]
+mrl_dims = [768, 512, 256, 128]
+gated = true
+
+# Rerankers (cross-encoders) check mined hard negatives when
+# [trainer] reranker is set: a "negative" the reranker thinks answers the
+# query is probably a correct answer, and is not used. Opt-in, because it is
+# an extra download.
+
+[[rerankers]]
+id = "bge-reranker-v2-m3"
+hf = "BAAI/bge-reranker-v2-m3"
+revision = "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"
+parameters = "568M"
+languages = "100+ languages"
+notes = "Strongest. Slow on a CPU for large datasets."
+
+[[rerankers]]
+id = "mmarco-minilm-l12"
+hf = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+revision = "1427fd652930e4ba29e8149678df786c240d8825"
+parameters = "118M"
+languages = "~100 languages"
+notes = "Small and fast; fine on a CPU."

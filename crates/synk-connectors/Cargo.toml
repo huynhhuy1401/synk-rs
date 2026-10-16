@@ -1,0 +1,21 @@
+[package]
+name = "synk-connectors"
+description = "Data source connectors for synk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+synk-core.workspace = true
+blake3.workspace = true
+globset.workspace = true
+ignore.workspace = true
+htmd = "0.5.6"
+pdf-extract = "0.12.1"
+quick-xml = "0.42.0"
+zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile.workspace = true

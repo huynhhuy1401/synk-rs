@@ -1,0 +1,13 @@
+[package]
+name = "synk-store"
+description = "Local SQLite storage for synk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+synk-core.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
