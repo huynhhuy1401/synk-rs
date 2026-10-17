@@ -416,7 +416,13 @@ fn main() -> ExitCode {
         // With --json, bad arguments are an INVALID_ARGS object like any
         // other error. --help and --version print as usual.
         Err(e) if e.use_stderr() && std::env::args().any(|a| a == "--json") => {
-            return output::print(true, Err(usage_error(&e.to_string())));
+            return output::print(
+                true,
+                Err(usage_error(
+                    &e.to_string(),
+                    &std::env::args().collect::<Vec<_>>(),
+                )),
+            );
         }
         Err(e) => e.exit(),
     };
@@ -536,7 +542,7 @@ fn main() -> ExitCode {
 
 /// A usage error, with clap's "did you mean" as `next` when it names a
 /// command, or as a hint otherwise.
-fn usage_error(clap_error: &str) -> SynkError {
+fn usage_error(clap_error: &str, args: &[String]) -> SynkError {
     let message = clap_error
         .lines()
         .next()
@@ -548,7 +554,25 @@ fn usage_error(clap_error: &str) -> SynkError {
         .find_map(|l| l.trim().strip_prefix("tip: "));
     let quoted = tip.and_then(|t| t.split('\'').nth(1));
     match (tip, quoted) {
-        (Some(t), Some(name)) if t.contains("subcommand") => err.with_next(format!("synk {name}")),
+        (Some(t), Some(name)) if t.contains("subcommand") => {
+            // The command as typed, with the misspelled word corrected.
+            let bad = message.split('\'').nth(1).unwrap_or_default();
+            let mut fixed = false;
+            let words: Vec<String> = args
+                .iter()
+                .skip(1)
+                .filter(|a| *a != "--json")
+                .map(|a| {
+                    if !fixed && a == bad {
+                        fixed = true;
+                        name.to_owned()
+                    } else {
+                        output::shell_word(a)
+                    }
+                })
+                .collect();
+            err.with_next(format!("synk {}", words.join(" ")))
+        }
         (Some(t), _) => err.with_hint(t).with_next("synk --help"),
         _ => err.with_next("synk --help"),
     }

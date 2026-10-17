@@ -239,11 +239,12 @@ pub fn resolve(ws: &Workspace, names: &[String]) -> Result<Vec<Item>> {
     for raw in names {
         let name = raw.trim();
         let item = if name == TRAINER {
+            let present = ws.trainer().is_ok();
             Item {
                 name: TRAINER.into(),
                 what: "the Python trainer (PyTorch, sentence-transformers)".into(),
-                present: ws.trainer().is_ok(),
-                bytes: None,
+                present,
+                bytes: (!present).then(|| graph::trainer_bytes(sidecar::detect_backend().0)),
                 work: Work::Trainer,
             }
         } else if name == GENERAL_CHECK {

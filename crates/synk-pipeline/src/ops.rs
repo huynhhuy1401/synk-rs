@@ -464,7 +464,7 @@ impl Ops {
     /// The number of dataset `key`, assigning the next one when `assign`.
     pub fn dataset_number(&self, key: &str, assign: bool) -> Result<Option<u64>> {
         let path = self.datasets_path();
-        let mut map: BTreeMap<String, u64> = read_json(&path).unwrap_or_default();
+        let mut map = read_numbers(&path)?;
         if let Some(n) = map.get(key) {
             return Ok(Some(*n));
         }
@@ -486,7 +486,7 @@ impl Ops {
     /// Takes the next number of `kind`: above every number ever handed out.
     fn next_number(&self, kind: OpKind, at_least: u64) -> Result<u64> {
         let path = self.seq_path();
-        let mut seq: BTreeMap<String, u64> = read_json(&path).unwrap_or_default();
+        let mut seq = read_numbers(&path)?;
         let existing = self.list_kind(kind)?.iter().map(|r| r.n).max().unwrap_or(0);
         let n = seq
             .get(kind.prefix())
@@ -760,27 +760,49 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
 }
 
+/// A numbering file (seq.json, datasets.json): empty when it doesn't exist
+/// yet, an error when it can't be read, so numbers are never handed out
+/// again.
+fn read_numbers(path: &Path) -> Result<BTreeMap<String, u64>> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(SynkError::io(path.display(), e)),
+    };
+    serde_json::from_str(&text).map_err(|e| {
+        SynkError::new(
+            ErrorCode::Store,
+            format!("{} can't be read: {e}", path.display()),
+        )
+        .with_hint(
+            "restore it from a backup; synk writes it, so it was changed or damaged outside synk",
+        )
+    })
+}
+
+/// Writes a whole file at once (to a temporary file, then renamed over it),
+/// so a crash never leaves half of it.
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| SynkError::io(dir.display(), e))?;
     }
     let text = serde_json::to_string_pretty(value).expect("json serializes");
-    fs::write(path, text).map_err(|e| SynkError::io(path.display(), e))
-}
-
-pub(crate) fn write_record(dir: &Path, record: &OpRecord) -> Result<()> {
-    let path = dir.join("op.json");
-    let tmp = dir.join("op.json.tmp");
-    let text = serde_json::to_string_pretty(record).expect("op record serializes");
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
     fs::write(&tmp, text).map_err(|e| SynkError::io(tmp.display(), e))?;
     // On Windows a reader may hold the file open for a moment.
     for _ in 0..20 {
-        if fs::rename(&tmp, &path).is_ok() {
+        if fs::rename(&tmp, path).is_ok() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    fs::rename(&tmp, &path).map_err(|e| SynkError::io(path.display(), e))
+    fs::rename(&tmp, path).map_err(|e| SynkError::io(path.display(), e))
+}
+
+pub(crate) fn write_record(dir: &Path, record: &OpRecord) -> Result<()> {
+    write_json(&dir.join("op.json"), record)
 }
 
 /// The running operation, owned by the command that started it.
@@ -950,6 +972,17 @@ mod tests {
             settings_hash: "h".into(),
             n: None,
         }
+    }
+
+    #[test]
+    fn a_damaged_numbering_file_stops_instead_of_numbering_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Ops::new(dir.path().to_path_buf());
+        assert_eq!(ops.dataset_number("a", true).unwrap(), Some(1));
+        assert!(!dir.path().join("ops/datasets.json.tmp").exists());
+        fs::write(ops.datasets_path(), "{\"a\": 1, \"b").unwrap();
+        let err = ops.dataset_number("c", true).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Store);
     }
 
     #[test]

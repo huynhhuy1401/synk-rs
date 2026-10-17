@@ -180,7 +180,9 @@ also tests both models on NanoMSMARCO (English web search) and XQuAD
 
 **Real queries.** Your own searches are the most honest test: they're used
 to test, never to train, and 30 or more about 10+ documents decide the
-verdict. A few become style examples for the LLM instead; they're chosen once
+verdict. A few (one in four, at most 5) become style examples for the LLM
+instead and don't count toward the 30 (`queries import` reports `evaluated`
+and `decides_verdict`); they're chosen once
 and kept (`queries import --restyle` chooses again). Choosing them changes
 every chunk's prompt, so the dry run says when it will happen and how many LLM
 calls that costs (`style_examples_change`). To write some, let synk
@@ -355,7 +357,7 @@ test could have seen a typical gain of about 0.05 and didn't) or
 `permutation_p` is an exact sign-flip p-value next to the t-test's
 `p_value`, and with real searches `agreement` says whether they agree with
 the generated test. Real searches decide the verdict once there are 30 or
-more about 10+ documents.
+more about 10+ documents, besides the style examples.
 
 **Advice** (`data.advice` of `train`, `data.pipeline.advice`, and of
 `train --dry-run`) suggests how to get

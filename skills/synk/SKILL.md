@@ -66,7 +66,8 @@ synk export <run> --out ./model --json      # when data.verdict.outcome is "bett
   searches.jsonl` lists documents with an empty search each; the *user*
   fills them in, without opening the documents (don't write them yourself:
   that tests the model on your style, not theirs). Then `synk queries import
-  searches.jsonl`. 30+ searches about 10+ documents decide the verdict.
+  searches.jsonl`. 30+ searches about 10+ documents, besides the style
+  examples, decide the verdict (`data.decides_verdict` says when).
 - `synk run list --json` lists every run with its state, verdict and the
   settings that differ from synk.toml (`differs`).
 - `synk run inspect <run> --json` shows the queries that improved or got worse,

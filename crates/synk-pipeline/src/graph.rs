@@ -312,6 +312,15 @@ impl Preview {
 
 /// The fetch name of a Hugging Face model: its catalog ID or `hf:org/name`,
 /// with `@` and the start of its commit when pinned.
+/// About how much the trainer's packages download for a backend.
+pub fn trainer_bytes(backend: sidecar::Backend) -> u64 {
+    if backend == sidecar::Backend::Cpu {
+        TRAINER_BYTES_CPU
+    } else {
+        TRAINER_BYTES_GPU
+    }
+}
+
 pub fn fetch_name(spec: &ModelSpec) -> String {
     let base = spec
         .catalog_id
@@ -521,11 +530,7 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
             ),
             (None, None) => {
                 let (backend, why) = sidecar::detect_backend();
-                let bytes = if backend == sidecar::Backend::Cpu {
-                    TRAINER_BYTES_CPU
-                } else {
-                    TRAINER_BYTES_GPU
-                };
+                let bytes = trainer_bytes(backend);
                 b.consent.push(Consent {
                     kind: "download".into(),
                     name: Some(TRAINER.into()),
@@ -1131,30 +1136,11 @@ fn disk_needs(
     text_bytes: u64,
 ) -> Vec<crate::disk::Volume> {
     use crate::disk::{self, Need};
-    let mut needs = Vec::new();
-    let local_llm = crate::generator::is_local(&ws.cfg.generator.base_url);
-    for c in consent.iter().filter(|c| c.kind == "download") {
-        let (Some(name), Some(bytes)) = (c.name.as_deref(), c.bytes) else {
-            continue;
-        };
-        let place = if name == "trainer" {
-            Some((sidecar::synk_home(), bytes * disk::TRAINER_UNPACKED))
-        } else if name.starts_with("ollama:") {
-            local_llm
-                .then(disk::ollama_models_dir)
-                .flatten()
-                .map(|d| (d, bytes))
-        } else {
-            hub::cache_dir().map(|d| (d, bytes))
-        };
-        if let Some((path, bytes)) = place {
-            needs.push(Need {
-                what: c.what.clone(),
-                path,
-                bytes,
-            });
-        }
-    }
+    let mut needs: Vec<Need> = consent
+        .iter()
+        .filter(|c| c.kind == "download")
+        .filter_map(|c| download_need(ws, c.name.as_deref()?, &c.what, c.bytes?))
+        .collect();
     let runs = |step| {
         steps
             .iter()
@@ -1172,6 +1158,46 @@ fn disk_needs(
         needs.extend(training_need(ws, model));
     }
     disk::check(needs)
+}
+
+/// Where a download by its fetch name lands, and how much it takes there
+/// (the trainer grows when installed). None when it isn't on this machine's
+/// disk (a remote LLM server) or the place is unknown.
+pub fn download_need(
+    ws: &Workspace,
+    name: &str,
+    what: &str,
+    bytes: u64,
+) -> Option<crate::disk::Need> {
+    use crate::disk;
+    let (path, bytes) = if name == TRAINER {
+        (sidecar::synk_home(), bytes * disk::TRAINER_UNPACKED)
+    } else if name.starts_with("ollama:") {
+        crate::generator::is_local(&ws.cfg.generator.base_url)
+            .then(disk::ollama_models_dir)
+            .flatten()
+            .map(|d| (d, bytes))?
+    } else {
+        (hub::cache_dir()?, bytes)
+    };
+    Some(disk::Need {
+        what: what.to_owned(),
+        path,
+        bytes,
+    })
+}
+
+/// Fails with `INSUFFICIENT_DISK` if `needs` won't fit (unless
+/// SYNK_DISK_CHECK=warn): before `synk fetch` downloads, and before training.
+pub fn check_space(needs: Vec<crate::disk::Need>) -> Result<()> {
+    if crate::disk::warn_only() {
+        return Ok(());
+    }
+    let volumes = crate::disk::check(needs);
+    match volumes.iter().find(|v| v.short()) {
+        Some(v) => Err(insufficient_disk(v)),
+        None => Ok(()),
+    }
 }
 
 /// What training writes: checkpoints and models, from the model's parameter
@@ -1206,14 +1232,7 @@ pub fn training_need(ws: &Workspace, model: &ModelSpec) -> Option<crate::disk::N
 /// Before training starts (the dataset step may have taken hours): fails
 /// with `INSUFFICIENT_DISK` if its checkpoints won't fit.
 pub fn check_training_space(ws: &Workspace, model: &ModelSpec) -> Result<()> {
-    if crate::disk::warn_only() {
-        return Ok(());
-    }
-    let volumes = crate::disk::check(training_need(ws, model).into_iter().collect());
-    match volumes.iter().find(|v| v.short()) {
-        Some(v) => Err(insufficient_disk(v)),
-        None => Ok(()),
-    }
+    check_space(training_need(ws, model).into_iter().collect())
 }
 
 fn insufficient_disk(volume: &crate::disk::Volume) -> SynkError {

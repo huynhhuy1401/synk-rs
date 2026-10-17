@@ -632,7 +632,15 @@ fn document_row(row: &rusqlite::Row) -> rusqlite::Result<Document> {
     })
 }
 
+/// A database error; a full disk is `INSUFFICIENT_DISK`, as for files.
 fn store_err(e: rusqlite::Error) -> SynkError {
+    if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) {
+        return SynkError::new(
+            ErrorCode::InsufficientDisk,
+            format!("the disk is full: the store: {e}"),
+        )
+        .with_hint("free some space, then run the same command again; finished steps are kept");
+    }
     SynkError::new(ErrorCode::Store, e.to_string())
 }
 
@@ -672,6 +680,17 @@ impl std::ops::Deref for Write<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_disk_is_insufficient_disk() {
+        let full = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+            None,
+        );
+        assert_eq!(store_err(full).code, ErrorCode::InsufficientDisk);
+        let other = rusqlite::Error::QueryReturnedNoRows;
+        assert_eq!(store_err(other).code, ErrorCode::Store);
+    }
 
     fn doc(id: &str, hash: &str) -> Document {
         Document {

@@ -251,20 +251,36 @@ pub fn queries_per_chunk(setting: AutoOr<usize>, train_chunks: usize) -> usize {
 /// doesn't change the prompt of every chunk and re-ask the LLM for all of
 /// them; `synk queries import --restyle` chooses again.
 pub fn style_pool(store: &Store) -> Result<Vec<synk_store::RealQuery>> {
-    // Always in the same order: the prompt lists them, and is cached by it.
-    let mut real = store.real_queries()?;
-    real.sort_by_key(|q| short_hash(&q.query));
-    let chosen: Vec<_> = real.iter().filter(|q| q.style).cloned().collect();
-    if !chosen.is_empty() {
-        return Ok(chosen);
-    }
-    let mut pool = real;
-    pool.truncate(style_examples(pool.len()));
-    if !pool.is_empty() {
+    let (pool, chosen) = pick_style(store.real_queries()?);
+    if !chosen && !pool.is_empty() {
         let ids: Vec<i64> = pool.iter().map(|q| q.id).collect();
         store.set_style_queries(&ids)?;
     }
     Ok(pool)
+}
+
+/// The style examples: the ones already chosen (true), or the ones the next
+/// dataset will choose.
+fn pick_style(mut real: Vec<synk_store::RealQuery>) -> (Vec<synk_store::RealQuery>, bool) {
+    // Always in the same order: the prompt lists them, and is cached by it.
+    real.sort_by_key(|q| short_hash(&q.query));
+    let chosen: Vec<_> = real.iter().filter(|q| q.style).cloned().collect();
+    if !chosen.is_empty() {
+        return (chosen, true);
+    }
+    real.truncate(style_examples(real.len()));
+    (real, false)
+}
+
+/// The real queries evaluation will use: all but the style examples (those
+/// chosen, or that the next dataset will choose). Reads the store only.
+pub fn evaluated_real_queries(store: &Store) -> Result<Vec<synk_store::RealQuery>> {
+    let real = store.real_queries()?;
+    let (style, _) = pick_style(real.clone());
+    Ok(real
+        .into_iter()
+        .filter(|q| !style.iter().any(|s| s.id == q.id))
+        .collect())
 }
 
 /// How many of `real` queries become style examples.

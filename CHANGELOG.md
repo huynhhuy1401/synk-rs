@@ -25,7 +25,7 @@ few chunks whose detected language changed). Existing trainers keep working;
   (`permutation_p`).
 - **`synk queries template`** writes a file of documents to fill in with
   your own searches. Real searches decide the verdict at 30+ about 10+
-  documents; `agreement` and new advice (`REAL_QUERIES_FEW_DOCUMENTS`, which
+  documents, besides the few kept as style examples; `agreement` and new advice (`REAL_QUERIES_FEW_DOCUMENTS`, which
   says how many more searches and documents, and `SYNTHETIC_REAL_DISAGREE`)
   compare them with the generated test.
 - Style examples for the LLM are chosen once and kept, so importing more
@@ -44,10 +44,11 @@ few chunks whose detected language changed). Existing trainers keep working;
   run.
 - The trainer stops when synk stops (a stdin lifeline), and runs in its own
   process group.
-- **Disk space** is checked before downloads and training (`data.disk`,
+- **Disk space** is checked before downloads (`synk fetch` too) and
+  training (`data.disk`, shown per drive in the dry run;
   `INSUFFICIENT_DISK`, `DISK_SPACE_TIGHT`; `SYNK_DISK_CHECK=warn`), and a
-  full disk mid-run is reported as `INSUFFICIENT_DISK` with the step and
-  path.
+  full disk mid-run, the store's included, is reported as
+  `INSUFFICIENT_DISK` with the step and path.
 - GGUF export ships llama.cpp's converter inside synk: no download (it used
   to fetch the whole repository without asking). The export result
   (`data.converter`) and the model's README name its commit.
@@ -57,7 +58,13 @@ few chunks whose detected language changed). Existing trainers keep working;
   server's error text; Ollama's model is unloaded before training so the GPU
   is free; one GPU is used even when several are visible; fp16 on GPUs
   without native bf16 (T4, RTX 20).
-- Every `next` hint runs as written.
+- Every `next` hint runs as written: a mistyped subcommand keeps its parent
+  and arguments (`synk run shwo run:3` suggests `synk run show run:3`), and a
+  hint that downloads is never `machine` applicable.
+- Only real loopback addresses count as this machine for the LLM server
+  (`127.evil.example` used to), so text never leaves without
+  `allow_remote`.
+- Run and dataset numbers are written atomically and never reused.
 
 ### Vietnamese and mixed text
 

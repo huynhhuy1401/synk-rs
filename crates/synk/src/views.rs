@@ -32,13 +32,12 @@ pub fn import_queries(
     }
     let real = store.real_queries()?;
     let total = real.len();
-    let documents = real
-        .iter()
-        .map(|q| q.doc.as_str())
-        .collect::<std::collections::HashSet<_>>()
-        .len();
+    let documents = distinct_documents(&real);
+    // Style examples are left out of evaluation, so only the rest count.
+    let evaluated = synk_pipeline::dataset::evaluated_real_queries(&store)?;
     let next = "synk train --dry-run";
-    let decides = total >= MIN_REAL_QUERIES && documents as u64 >= MIN_REAL_DOCUMENTS;
+    let decides = evaluated.len() >= MIN_REAL_QUERIES
+        && distinct_documents(&evaluated) as u64 >= MIN_REAL_DOCUMENTS;
     let mut human = format!(
         "Real queries: {} added, {} already there, {} removed; {total} in total, about {documents} documents.",
         stats.added, stats.unchanged, stats.removed,
@@ -48,7 +47,8 @@ pub fn import_queries(
     }
     let _ = write!(
         human,
-        "\nThey are used to evaluate, never to train; {MIN_REAL_QUERIES} or more about {MIN_REAL_DOCUMENTS}+ documents decide the verdict{}.",
+        "\nThey are used to evaluate, never to train, except {} kept as examples of your style; {MIN_REAL_QUERIES} or more of the rest about {MIN_REAL_DOCUMENTS}+ documents decide the verdict{}.",
+        total - evaluated.len(),
         if decides { " (yours do)" } else { "" }
     );
     if restyle {
@@ -66,11 +66,20 @@ pub fn import_queries(
             "skipped_empty": parsed.skipped_empty,
             "total": total,
             "documents": documents,
+            "evaluated": evaluated.len(),
             "decides_verdict": decides,
             "restyled": restyle,
             "next": next,
         }),
     })
+}
+
+fn distinct_documents(queries: &[synk_store::RealQuery]) -> usize {
+    queries
+        .iter()
+        .map(|q| q.doc.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
 }
 
 /// Writes a file listing some documents with an empty search each, for the
@@ -146,6 +155,9 @@ pub fn list_queries(project: &Project) -> Result<Output> {
     let mut human = format!("{} real queries", queries.len());
     for q in &queries {
         let _ = write!(human, "\n  {:<40} -> {}", q.query, q.doc);
+        if q.style {
+            human.push_str("   (style example, not evaluated)");
+        }
     }
     let next = if queries.is_empty() {
         // A template written earlier is imported, not overwritten.

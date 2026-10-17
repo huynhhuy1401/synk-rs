@@ -285,6 +285,13 @@ pub struct SynkError {
     pub details: Value,
 }
 
+/// Whether a synk command may download or send text off the machine, so
+/// it needs a person's agreement (ADR 0002).
+pub fn spends(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    matches!(words.get(1), Some(&"setup" | &"fetch")) || words.contains(&"--yes")
+}
+
 impl SynkError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
@@ -299,7 +306,8 @@ impl SynkError {
     }
 
     /// A command that can be run exactly as written. It also becomes the
-    /// first action.
+    /// first action: `machine`, unless it downloads (`setup`, `fetch`,
+    /// `--yes`), which a person agrees to first.
     pub fn with_next(mut self, next: impl Into<String>) -> Self {
         let next = next.into();
         // Prose or a placeholder belongs in `with_hint` / `with_action`.
@@ -307,9 +315,14 @@ impl SynkError {
             next.starts_with("synk ") && !next.contains('<'),
             "`next` must be a runnable synk command, got {next:?}"
         );
+        let applicability = if spends(&next) {
+            Applicability::Review
+        } else {
+            Applicability::Machine
+        };
         self.actions.insert(
             0,
-            ErrorAction::run(&next, Applicability::Machine, "the most likely fix"),
+            ErrorAction::run(&next, applicability, "the most likely fix"),
         );
         self.next = Some(next);
         self
@@ -372,6 +385,21 @@ mod tests {
             assert!(seen.insert(code.as_str()), "{code:?} listed twice");
             let json = serde_json::to_value(code).unwrap();
             assert_eq!(json, code.as_str());
+        }
+    }
+
+    #[test]
+    fn a_next_that_downloads_is_never_machine() {
+        for (next, applicability) in [
+            ("synk setup --backend cpu", "review"),
+            ("synk fetch base:bge-m3", "review"),
+            ("synk train --yes", "review"),
+            ("synk train --dry-run", "machine"),
+            ("synk status", "machine"),
+        ] {
+            let err = SynkError::new(ErrorCode::RunNotFound, "x").with_next(next);
+            let json = serde_json::to_value(&err).unwrap();
+            assert_eq!(json["actions"][0]["applicability"], applicability, "{next}");
         }
     }
 

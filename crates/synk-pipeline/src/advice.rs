@@ -479,38 +479,34 @@ pub fn steps(train: &Value, cfg: &PipelineConfig) -> Option<Advice> {
     }
 }
 
-/// The `next` hint from the first warning an agent can apply as is.
+/// The `next` hint from the first warning an agent can apply as is: its
+/// command, with any settings as `--set` on a dry run. A warning that only
+/// removes settings can't be written as one command, so it stays in
+/// `advice` and gives no `next`.
 pub fn next(advice: &[Advice]) -> Option<String> {
-    let a = advice
+    advice
         .iter()
-        .find(|a| a.severity == Severity::Warning && a.applicability == Applicability::Machine)?;
-    let action = a.action.as_ref()?;
-    let command = action.command.clone().unwrap_or_default();
+        .filter(|a| a.severity == Severity::Warning && a.applicability == Applicability::Machine)
+        .find_map(|a| runnable(a.action.as_ref()?))
+}
+
+fn runnable(action: &Action) -> Option<String> {
+    let command = action.command.clone()?;
     let Some(config) = &action.config else {
         return Some(command);
     };
     // Only settings to set: try them as a variant first; that's read-only.
-    if command == "synk train --dry-run" && config.values().all(|v| !v.is_null()) {
-        let sets: Vec<String> = config
-            .iter()
-            .map(|(k, v)| match v {
-                Value::String(s) => format!("--set {k}={s}"),
-                v => format!("--set {k}={v}"),
-            })
-            .collect();
-        return Some(format!("synk train --dry-run {}", sets.join(" ")));
+    if command != "synk train --dry-run" || config.values().any(Value::is_null) {
+        return None;
     }
-    let changes: Vec<String> = config
+    let sets: Vec<String> = config
         .iter()
         .map(|(k, v)| match v {
-            Value::Null => format!("remove {k}"),
-            v => format!("set {k} = {v}"),
+            Value::String(s) => format!("--set {k}={s}"),
+            v => format!("--set {k}={v}"),
         })
         .collect();
-    Some(format!(
-        "In synk.toml, {}; then: {command}",
-        changes.join(", ")
-    ))
+    Some(format!("synk train --dry-run {}", sets.join(" ")))
 }
 
 #[cfg(test)]
@@ -576,10 +572,8 @@ mod tests {
             codes,
             ["CHUNKS_TRUNCATED", "CHUNK_CHARS_DEPRECATED", "FEW_QUERIES"]
         );
-        assert_eq!(
-            next(&advice).unwrap(),
-            "In synk.toml, remove dataset.chunk_chars, set dataset.chunk_tokens = \"auto\"; then: synk train --dry-run"
-        );
+        // Removing a setting isn't one command, so there is no next.
+        assert!(next(&advice).is_none());
         let value = serde_json::to_value(&advice[2]).unwrap();
         assert_eq!(value["action"]["config"]["generator.queries_per_chunk"], 5);
         assert_eq!(value["applicability"], "machine");

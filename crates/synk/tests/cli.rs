@@ -672,6 +672,13 @@ fn fetch_checks_names_and_skips_what_is_here() {
     let trainer = synk(root, &["fetch", "trainer"]);
     assert_eq!(trainer["data"]["items"][0]["present"], true);
     assert_eq!(trainer["data"]["next"], "synk train --dry-run");
+    // A download that won't fit stops before it starts.
+    let full = synk_env(
+        root,
+        &["fetch", "trainer"],
+        &[("SYNK_FAKE_TRAINER", "0"), ("SYNK_TEST_FREE_BYTES", "1000")],
+    );
+    assert_eq!(error_code(&full), "INSUFFICIENT_DISK", "{full}");
 }
 
 #[test]
@@ -1053,6 +1060,8 @@ fn a_template_of_searches_imports_and_style_examples_stay_fixed() {
     };
     let before = style(&listed);
     assert_eq!(before.len(), 2, "{listed}");
+    let (human, _, _) = synk_human(root, &["queries", "list"]);
+    assert_eq!(human.matches("(style example").count(), 2, "{human}");
     // More searches: the examples don't change, so the LLM isn't re-asked.
     fs::write(
         root.join("more.jsonl"),
@@ -1222,10 +1231,10 @@ fn real_searches_decide_the_verdict_at_thirty_about_ten_documents() {
                 .to_owned()
         })
         .collect();
-    let searches = |docs: &[String]| {
+    let searches = |docs: &[String], each| {
         let mut text = String::new();
         for doc in docs {
-            for k in 0..5 {
+            for k in 0..each {
                 text.push_str(&format!(
                     "{{\"query\": \"{doc} search {k}\", \"doc\": \"{doc}\"}}\n"
                 ));
@@ -1234,7 +1243,7 @@ fn real_searches_decide_the_verdict_at_thirty_about_ten_documents() {
         text
     };
     // 45 searches about 9 documents: they don't decide yet.
-    fs::write(root.join("s.jsonl"), searches(&docs[..9])).unwrap();
+    fs::write(root.join("s.jsonl"), searches(&docs[..9], 5)).unwrap();
     synk(root, &["queries", "import", "s.jsonl"]);
     let trained = synk(root, &["train"]);
     assert_ne!(
@@ -1250,13 +1259,23 @@ fn real_searches_decide_the_verdict_at_thirty_about_ten_documents() {
         .clone();
     assert_eq!(advice["evidence"]["more_documents"], 1, "{advice}");
     // The tenth document's searches: now they decide.
-    fs::write(root.join("s.jsonl"), searches(&docs)).unwrap();
-    synk(root, &["queries", "import", "s.jsonl"]);
+    fs::write(root.join("s.jsonl"), searches(&docs, 5)).unwrap();
+    let imported = synk(root, &["queries", "import", "s.jsonl"]);
+    assert_eq!(imported["data"]["decides_verdict"], true, "{imported}");
     let trained = synk(root, &["train"]);
     assert_eq!(
         trained["data"]["verdict"]["query_kind"], "real",
         "{trained}"
     );
+    // Exactly 30: 5 become style examples, so the 25 left don't decide.
+    fs::write(root.join("s.jsonl"), searches(&docs, 3)).unwrap();
+    let imported = synk(
+        root,
+        &["queries", "import", "s.jsonl", "--replace", "--restyle"],
+    );
+    assert_eq!(imported["data"]["total"], 30, "{imported}");
+    assert_eq!(imported["data"]["evaluated"], 25);
+    assert_eq!(imported["data"]["decides_verdict"], false);
 }
 
 /// A real Ctrl-C (SIGINT), not the test hook.
@@ -1327,6 +1346,16 @@ fn the_dry_run_checks_free_disk_space() {
     assert!(needs[0].1 > 1_000_000);
     assert_eq!(needs[1], ("training checkpoints and models", 20_000));
     assert_eq!(disk["need_bytes"], needs[0].1 + 20_000);
+
+    let human = command(root, &[("SYNK_TEST_FREE_BYTES", "100000000000")])
+        .args(train_args)
+        .output()
+        .unwrap();
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        human.contains("Disk: about 2 MB of 100.0 GB free on the drive of "),
+        "{human}"
+    );
 
     let full = synk_env(root, &train_args, &[("SYNK_TEST_FREE_BYTES", "1000")]);
     let blocker = &full["data"]["blockers"][0];
@@ -1908,6 +1937,14 @@ fn usage_errors_exit_2_and_suggest_the_command() {
             assert!(stderr.contains("Usage: synk "), "{stderr}");
         }
     }
+    // A subcommand keeps its parent and the other arguments.
+    let nested = synk(dir.path(), &["run", "shwo", "run:3"]);
+    assert_eq!(nested["error"]["next"], "synk run show run:3");
+    assert_eq!(nested["error"]["actions"][0]["applicability"], "machine");
+    // A suggestion that downloads is for a person to agree to.
+    let setup = synk(dir.path(), &["setupp"]);
+    assert_eq!(setup["error"]["next"], "synk setup");
+    assert_eq!(setup["error"]["actions"][0]["applicability"], "review");
 }
 
 #[test]

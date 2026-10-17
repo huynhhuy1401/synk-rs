@@ -223,6 +223,15 @@ fn render_preview(preview: &Preview, would: &str) -> String {
         );
         out.push('\n');
     }
+    for v in &preview.disk {
+        let _ = writeln!(
+            out,
+            "Disk: about {} of {} free on the drive of {}.",
+            gb(v.need_bytes),
+            gb(v.free_bytes),
+            v.path.display()
+        );
+    }
     out.push_str(&egress_line(preview));
     let total = preview.totals["est_seconds"].as_u64().unwrap_or(0);
     if total > 0 {
@@ -914,6 +923,13 @@ pub fn fetch(
             }),
         });
     }
+    graph::check_space(
+        items
+            .iter()
+            .filter(|i| !i.present)
+            .filter_map(|i| graph::download_need(&ws, &i.name, &i.what, i.bytes?))
+            .collect(),
+    )?;
     let (record, done) = run_fetch(&ws, &items, backend, &mut display)?;
     let mut human = record.id.clone();
     for d in &done {
