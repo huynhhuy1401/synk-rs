@@ -616,16 +616,17 @@ fn push_clean(
     });
 }
 
-/// True when `base_url` points at this machine.
+/// True when `base_url` points at this machine. Parsed by the same URL
+/// parser the requests use, so the host checked is the host contacted
+/// (`http://evil.com?@127.0.0.1` is evil.com).
 pub fn is_local(base_url: &str) -> bool {
-    let rest = base_url.split_once("://").map_or(base_url, |(_, r)| r);
-    let authority = rest.split('/').next().unwrap_or_default();
-    let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a);
-    let host = if let Some(v6) = authority.strip_prefix('[') {
-        v6.split(']').next().unwrap_or_default()
-    } else {
-        authority.split(':').next().unwrap_or_default()
+    let Ok(uri) = base_url.parse::<ureq::http::Uri>() else {
+        return false;
     };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
@@ -646,6 +647,9 @@ mod tests {
         assert!(!is_local("http://192.168.1.5:11434/v1"));
         assert!(!is_local("http://127.evil.example/v1"));
         assert!(!is_local("http://127.0.0.1.example.com/v1"));
+        assert!(!is_local("http://evil.com?@127.0.0.1"));
+        assert!(!is_local("http://evil.com#@127.0.0.1/v1"));
+        assert!(is_local("http://user:pw@127.0.0.1:8080/v1"));
     }
 
     #[test]
