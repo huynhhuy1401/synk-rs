@@ -479,7 +479,7 @@ impl Ops {
 
     /// The dataset key numbered `n`.
     pub fn dataset_key(&self, n: u64) -> Option<String> {
-        let map: BTreeMap<String, u64> = read_json(&self.datasets_path()).unwrap_or_default();
+        let map = read_numbers(&self.datasets_path()).unwrap_or_default();
         map.into_iter().find(|(_, m)| *m == n).map(|(k, _)| k)
     }
 
@@ -695,7 +695,7 @@ impl Ops {
     /// Gives numbers to runs and datasets made before runs had records:
     /// oldest first. Does nothing once any run has a number.
     pub fn migrate(&self, artifacts: &Artifacts) -> Result<()> {
-        let seq: BTreeMap<String, u64> = read_json(&self.seq_path()).unwrap_or_default();
+        let seq = read_numbers(&self.seq_path())?;
         if seq.contains_key(OpKind::Run.prefix()) || !self.list_kind(OpKind::Run)?.is_empty() {
             return Ok(());
         }
@@ -756,6 +756,7 @@ fn not_found(id: &str) -> SynkError {
         .with_next("synk run list")
 }
 
+#[cfg(test)]
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
 }
