@@ -4,7 +4,8 @@
 //! the latest text of each document; datasets snapshot the text they use, so
 //! past training runs stay reproducible.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How long a command waits for another one's write to the store.
@@ -156,6 +157,7 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.to_path_buf());
         Self::init(Connection::open(path).map_err(store_err)?)
     }
 
@@ -632,14 +634,26 @@ fn document_row(row: &rusqlite::Row) -> rusqlite::Result<Document> {
     })
 }
 
-/// A database error; a full disk is `INSUFFICIENT_DISK`, as for files.
+/// The database file last opened, for a full disk's `path`. A synk command
+/// opens one project's store, so this is the file that filled up; passing
+/// it to every one of the store's error sites would mean a closure at each.
+static OPENED: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// A database error; a full disk is `INSUFFICIENT_DISK` with the path, as
+/// for files.
 fn store_err(e: rusqlite::Error) -> SynkError {
     if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) {
+        let path = OPENED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map_or_else(|| "the store".to_owned(), |p| p.display().to_string());
         return SynkError::new(
             ErrorCode::InsufficientDisk,
-            format!("the disk is full: the store: {e}"),
+            format!("the disk is full: {path}: {e}"),
         )
-        .with_hint("free some space, then run the same command again; finished steps are kept");
+        .with_hint("free some space, then run the same command again; finished steps are kept")
+        .with_detail("path", path.into());
     }
     SynkError::new(ErrorCode::Store, e.to_string())
 }
@@ -687,7 +701,12 @@ mod tests {
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
             None,
         );
-        assert_eq!(store_err(full).code, ErrorCode::InsufficientDisk);
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("synk.db");
+        Store::open(&db).unwrap();
+        let err = store_err(full);
+        assert_eq!(err.code, ErrorCode::InsufficientDisk);
+        assert_eq!(err.details["path"], db.display().to_string());
         let other = rusqlite::Error::QueryReturnedNoRows;
         assert_eq!(store_err(other).code, ErrorCode::Store);
     }
