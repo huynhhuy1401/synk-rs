@@ -626,7 +626,10 @@ pub fn is_local(base_url: &str) -> bool {
     } else {
         authority.split(':').next().unwrap_or_default()
     };
-    host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.")
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 #[cfg(test)]
@@ -641,6 +644,8 @@ mod tests {
         assert!(!is_local("https://api.example.com/v1"));
         assert!(!is_local("http://localhost.example.com/v1"));
         assert!(!is_local("http://192.168.1.5:11434/v1"));
+        assert!(!is_local("http://127.evil.example/v1"));
+        assert!(!is_local("http://127.0.0.1.example.com/v1"));
     }
 
     #[test]
