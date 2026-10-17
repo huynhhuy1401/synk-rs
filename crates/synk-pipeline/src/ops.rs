@@ -1103,15 +1103,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().to_path_buf();
         let barrier = Arc::new(std::sync::Barrier::new(2));
+        let tried = Arc::new(std::sync::Barrier::new(2));
         let handles: Vec<_> = (0..2)
             .map(|_| {
-                let (data, barrier) = (data.clone(), barrier.clone());
+                let (data, barrier, tried) = (data.clone(), barrier.clone(), tried.clone());
                 std::thread::spawn(move || {
                     let ops = Ops::new(data);
                     barrier.wait();
                     let started = ops.start(new_run("e5-small", None));
-                    // Hold it long enough for the other to try.
-                    std::thread::sleep(Duration::from_millis(400));
+                    // The winner holds it until the other has tried, however
+                    // slow the machine.
+                    tried.wait();
                     started.map(|op| op.finish(Ok(Value::Null)).id)
                 })
             })
