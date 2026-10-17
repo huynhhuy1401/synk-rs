@@ -5,9 +5,14 @@
 //! past training runs stay reproducible.
 
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, params};
+/// How long a command waits for another one's write to the store.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+
+use rusqlite::{
+    Connection, OptionalExtension, Savepoint, Transaction, TransactionBehavior, params,
+};
 use serde::Serialize;
 use synk_core::{Document, ErrorCode, FileState, KnownFiles, Result, SyncBatch, SynkError};
 
@@ -159,6 +164,10 @@ impl Store {
     }
 
     fn init(mut conn: Connection) -> Result<Self> {
+        // Two synk commands at once (a train and a status, or two trains,
+        // one of which then stops with JOB_RUNNING) take turns instead of
+        // failing with "database is locked".
+        conn.busy_timeout(BUSY_TIMEOUT).map_err(store_err)?;
         let applied: usize = conn
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .map_err(store_err)? as usize;
@@ -172,7 +181,9 @@ impl Store {
             )
             .with_hint("install a newer synk"));
         }
-        let tx = conn.transaction().map_err(store_err)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(store_err)?;
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(applied) {
             tx.execute_batch(sql).map_err(store_err)?;
             tx.pragma_update(None, "user_version", (i + 1) as i64)
@@ -221,14 +232,40 @@ impl Store {
     /// Runs `f` and undoes every change it made to the store, for plans
     /// that need to see what the store would look like after a sync.
     pub fn dry_run<T>(&mut self, f: impl FnOnce(&mut Store) -> Result<T>) -> Result<T> {
+        // A write like any other (see `write`), then undone.
+        let top = self.conn.is_autocommit();
         self.conn
-            .execute_batch("SAVEPOINT synk_dry_run")
+            .execute_batch(if top {
+                "BEGIN IMMEDIATE"
+            } else {
+                "SAVEPOINT synk_dry_run"
+            })
             .map_err(store_err)?;
         let result = f(self);
         self.conn
-            .execute_batch("ROLLBACK TO synk_dry_run; RELEASE synk_dry_run")
+            .execute_batch(if top {
+                "ROLLBACK"
+            } else {
+                "ROLLBACK TO synk_dry_run; RELEASE synk_dry_run"
+            })
             .map_err(store_err)?;
         result
+    }
+
+    /// Starts a write. At the top level it is `BEGIN IMMEDIATE`, so while
+    /// another command writes, this one waits (BUSY_TIMEOUT): a write that
+    /// started as a read can't wait, and fails with "database is locked".
+    /// Inside a dry run, a savepoint.
+    fn write(&mut self) -> Result<Write<'_>> {
+        Ok(if self.conn.is_autocommit() {
+            Write::Top(
+                self.conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(store_err)?,
+            )
+        } else {
+            Write::Nested(self.conn.savepoint().map_err(store_err)?)
+        })
     }
 
     /// The cached queries of a chunk, in the order they were generated.
@@ -347,7 +384,7 @@ impl Store {
         rows: &[(String, String, Option<String>)],
         replace: bool,
     ) -> Result<ImportStats> {
-        let tx = self.conn.savepoint().map_err(store_err)?;
+        let tx = self.write()?;
         let mut stats = ImportStats::default();
         if replace {
             let keep: std::collections::HashSet<_> = rows.iter().collect();
@@ -479,7 +516,7 @@ impl Store {
             skipped: batch.skipped.len(),
             ..SyncStats::default()
         };
-        let tx = self.conn.savepoint().map_err(store_err)?;
+        let tx = self.write()?;
 
         for doc in &batch.upserts {
             let live: bool = tx
@@ -603,6 +640,33 @@ fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// An open write; see `Store::write`. Dropped without `commit`, it rolls
+/// back.
+enum Write<'a> {
+    Top(Transaction<'a>),
+    Nested(Savepoint<'a>),
+}
+
+impl Write<'_> {
+    fn commit(self) -> rusqlite::Result<()> {
+        match self {
+            Write::Top(tx) => tx.commit(),
+            Write::Nested(sp) => sp.commit(),
+        }
+    }
+}
+
+impl std::ops::Deref for Write<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        match self {
+            Write::Top(tx) => tx,
+            Write::Nested(sp) => sp,
+        }
+    }
 }
 
 #[cfg(test)]
