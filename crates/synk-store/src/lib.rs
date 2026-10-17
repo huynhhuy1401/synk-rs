@@ -4,8 +4,7 @@
 //! the latest text of each document; datasets snapshot the text they use, so
 //! past training runs stay reproducible.
 
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How long a command waits for another one's write to the store.
@@ -153,26 +152,35 @@ impl SyncStats {
 
 pub struct Store {
     conn: Connection,
+    /// The database file (None in memory), named when the disk fills up.
+    path: Option<String>,
 }
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
-        *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some(path.to_path_buf());
-        Self::init(Connection::open(path).map_err(store_err)?)
+        let shown = Some(path.display().to_string());
+        Self::init(
+            Connection::open(path).map_err(|e| db_err(&shown, e))?,
+            shown,
+        )
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory().map_err(store_err)?)
+        Self::init(
+            Connection::open_in_memory().map_err(|e| db_err(&None, e))?,
+            None,
+        )
     }
 
-    fn init(mut conn: Connection) -> Result<Self> {
+    fn init(mut conn: Connection, path: Option<String>) -> Result<Self> {
         // Two synk commands at once (a train and a status, or two trains,
         // one of which then stops with JOB_RUNNING) take turns instead of
         // failing with "database is locked".
-        conn.busy_timeout(BUSY_TIMEOUT).map_err(store_err)?;
+        conn.busy_timeout(BUSY_TIMEOUT)
+            .map_err(|e| db_err(&path, e))?;
         let applied: usize = conn
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-            .map_err(store_err)? as usize;
+            .map_err(|e| db_err(&path, e))? as usize;
         if applied > MIGRATIONS.len() {
             return Err(SynkError::new(
                 ErrorCode::Store,
@@ -185,14 +193,14 @@ impl Store {
         }
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&path, e))?;
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(applied) {
-            tx.execute_batch(sql).map_err(store_err)?;
+            tx.execute_batch(sql).map_err(|e| db_err(&path, e))?;
             tx.pragma_update(None, "user_version", (i + 1) as i64)
-                .map_err(store_err)?;
+                .map_err(|e| db_err(&path, e))?;
         }
-        tx.commit().map_err(store_err)?;
-        Ok(Self { conn })
+        tx.commit().map_err(|e| db_err(&path, e))?;
+        Ok(Self { conn, path })
     }
 
     /// Every live document, ordered by ID.
@@ -203,9 +211,12 @@ impl Store {
                 "SELECT id, source, rel_path, title, text, size, modified, content_hash
                  FROM documents WHERE deleted = 0 ORDER BY id",
             )
-            .map_err(store_err)?;
-        let rows = stmt.query_map([], document_row).map_err(store_err)?;
-        rows.collect::<rusqlite::Result<_>>().map_err(store_err)
+            .map_err(|e| db_err(&self.path, e))?;
+        let rows = stmt
+            .query_map([], document_row)
+            .map_err(|e| db_err(&self.path, e))?;
+        rows.collect::<rusqlite::Result<_>>()
+            .map_err(|e| db_err(&self.path, e))
     }
 
     /// Cached generator output for a chunk, as stored by `put_queries`.
@@ -217,7 +228,7 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()
-            .map_err(store_err)
+            .map_err(|e| db_err(&self.path, e))
     }
 
     pub fn put_queries(&self, chunk_hash: &str, generator_key: &str, queries: &str) -> Result<()> {
@@ -228,7 +239,7 @@ impl Store {
                 params![chunk_hash, generator_key, queries, unix_now()],
             )
             .map(drop)
-            .map_err(store_err)
+            .map_err(|e| db_err(&self.path, e))
     }
 
     /// Runs `f` and undoes every change it made to the store, for plans
@@ -242,7 +253,7 @@ impl Store {
             } else {
                 "SAVEPOINT synk_dry_run"
             })
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
         let result = f(self);
         self.conn
             .execute_batch(if top {
@@ -250,7 +261,7 @@ impl Store {
             } else {
                 "ROLLBACK TO synk_dry_run; RELEASE synk_dry_run"
             })
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
         result
     }
 
@@ -258,15 +269,16 @@ impl Store {
     /// another command writes, this one waits (BUSY_TIMEOUT): a write that
     /// started as a read can't wait, and fails with "database is locked".
     /// Inside a dry run, a savepoint.
-    fn write(&mut self) -> Result<Write<'_>> {
-        Ok(if self.conn.is_autocommit() {
+    /// (Takes the connection, not the store, so the write's errors can
+    /// still name the file.)
+    fn write<'c>(conn: &'c mut Connection, path: &Option<String>) -> Result<Write<'c>> {
+        Ok(if conn.is_autocommit() {
             Write::Top(
-                self.conn
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(store_err)?,
+                conn.transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|e| db_err(path, e))?,
             )
         } else {
-            Write::Nested(self.conn.savepoint().map_err(store_err)?)
+            Write::Nested(conn.savepoint().map_err(|e| db_err(path, e))?)
         })
     }
 
@@ -278,7 +290,7 @@ impl Store {
                 "SELECT text, lang, cross_lang FROM query_slots
                  WHERE chunk_hash = ?1 AND generator_key = ?2 ORDER BY slot",
             )
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
         let rows = stmt
             .query_map([chunk_hash, generator_key], |r| {
                 Ok(QuerySlot {
@@ -287,9 +299,9 @@ impl Store {
                     cross: r.get::<_, i64>(2)? != 0,
                 })
             })
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
         rows.collect::<std::result::Result<_, _>>()
-            .map_err(store_err)
+            .map_err(|e| db_err(&self.path, e))
     }
 
     /// The most same-language queries ever asked for a chunk, and the cross
@@ -307,7 +319,7 @@ impl Store {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
         Ok(row.map_or((0, Vec::new()), |(n, langs)| {
             (
                 usize::try_from(n).unwrap_or(0),
@@ -339,7 +351,7 @@ impl Store {
                 ],
             )
             .map(drop)
-            .map_err(store_err)
+            .map_err(|e| db_err(&self.path, e))
     }
 
     /// Appends queries after the chunk's existing ones.
@@ -357,7 +369,7 @@ impl Store {
                 [chunk_hash, generator_key],
                 |r| r.get(0),
             )
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
         for (i, q) in queries.iter().enumerate() {
             self.conn
                 .execute(
@@ -374,7 +386,7 @@ impl Store {
                         unix_now()
                     ],
                 )
-                .map_err(store_err)?;
+                .map_err(|e| db_err(&self.path, e))?;
         }
         Ok(())
     }
@@ -386,25 +398,25 @@ impl Store {
         rows: &[(String, String, Option<String>)],
         replace: bool,
     ) -> Result<ImportStats> {
-        let tx = self.write()?;
+        let tx = Self::write(&mut self.conn, &self.path)?;
         let mut stats = ImportStats::default();
         if replace {
             let keep: std::collections::HashSet<_> = rows.iter().collect();
             let live = {
                 let mut stmt = tx
                     .prepare("SELECT id, query, doc, passage FROM real_queries WHERE deleted = 0")
-                    .map_err(store_err)?;
+                    .map_err(|e| db_err(&self.path, e))?;
                 stmt.query_map([], |r| {
                     Ok((r.get::<_, i64>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
                 })
-                .map_err(store_err)?
+                .map_err(|e| db_err(&self.path, e))?
                 .collect::<rusqlite::Result<Vec<(i64, (String, String, Option<String>))>>>()
-                .map_err(store_err)?
+                .map_err(|e| db_err(&self.path, e))?
             };
             for (id, row) in live {
                 if !keep.contains(&row) {
                     tx.execute("UPDATE real_queries SET deleted = 1 WHERE id = ?1", [id])
-                        .map_err(store_err)?;
+                        .map_err(|e| db_err(&self.path, e))?;
                     stats.removed += 1;
                 }
             }
@@ -417,7 +429,7 @@ impl Store {
                     params![query, doc, passage],
                     |r| r.get(0),
                 )
-                .map_err(store_err)?;
+                .map_err(|e| db_err(&self.path, e))?;
             if exists {
                 stats.unchanged += 1;
                 continue;
@@ -426,10 +438,10 @@ impl Store {
                 "INSERT INTO real_queries (query, doc, passage, imported_at) VALUES (?1, ?2, ?3, ?4)",
                 params![query, doc, passage, unix_now()],
             )
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
             stats.added += 1;
         }
-        tx.commit().map_err(store_err)?;
+        tx.commit().map_err(|e| db_err(&self.path, e))?;
         Ok(stats)
     }
 
@@ -440,7 +452,7 @@ impl Store {
             .prepare(
                 "SELECT id, query, doc, passage, style FROM real_queries WHERE deleted = 0 ORDER BY id",
             )
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
         let rows = stmt
             .query_map([], |r| {
                 Ok(RealQuery {
@@ -451,8 +463,9 @@ impl Store {
                     style: r.get::<_, i64>(4)? == 1,
                 })
             })
-            .map_err(store_err)?;
-        rows.collect::<rusqlite::Result<_>>().map_err(store_err)
+            .map_err(|e| db_err(&self.path, e))?;
+        rows.collect::<rusqlite::Result<_>>()
+            .map_err(|e| db_err(&self.path, e))
     }
 
     /// A stored fact (see migration 6).
@@ -460,7 +473,7 @@ impl Store {
         self.conn
             .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
             .optional()
-            .map_err(store_err)
+            .map_err(|e| db_err(&self.path, e))
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
@@ -470,7 +483,7 @@ impl Store {
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 [key, value],
             )
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
         Ok(())
     }
 
@@ -484,7 +497,7 @@ impl Store {
                 &format!("UPDATE real_queries SET style = (id IN ({list}))"),
                 [],
             )
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
         Ok(())
     }
 
@@ -496,7 +509,7 @@ impl Store {
                 "SELECT id, size, modified, content_hash FROM documents
                  WHERE source = ?1 AND deleted = 0",
             )
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
         let rows = stmt
             .query_map([source], |row| {
                 let state = FileState {
@@ -506,8 +519,9 @@ impl Store {
                 };
                 Ok((row.get::<_, String>(0)?, state))
             })
-            .map_err(store_err)?;
-        rows.collect::<rusqlite::Result<_>>().map_err(store_err)
+            .map_err(|e| db_err(&self.path, e))?;
+        rows.collect::<rusqlite::Result<_>>()
+            .map_err(|e| db_err(&self.path, e))
     }
 
     /// Applies one connector batch in a single transaction.
@@ -518,7 +532,7 @@ impl Store {
             skipped: batch.skipped.len(),
             ..SyncStats::default()
         };
-        let tx = self.write()?;
+        let tx = Self::write(&mut self.conn, &self.path)?;
 
         for doc in &batch.upserts {
             let live: bool = tx
@@ -528,7 +542,7 @@ impl Store {
                     |r| r.get(0),
                 )
                 .optional()
-                .map_err(store_err)?
+                .map_err(|e| db_err(&self.path, e))?
                 .unwrap_or(false);
             tx.execute(
                 "INSERT INTO documents
@@ -551,7 +565,7 @@ impl Store {
                     now
                 ],
             )
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
             if live {
                 stats.updated += 1;
             } else {
@@ -564,7 +578,7 @@ impl Store {
                 "UPDATE documents SET size = ?2, modified = ?3 WHERE id = ?1",
                 params![id, state.size as i64, state.modified],
             )
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
         }
 
         for id in &batch.deleted {
@@ -573,10 +587,10 @@ impl Store {
                     "UPDATE documents SET deleted = 1, synced_at = ?2 WHERE id = ?1 AND deleted = 0",
                     params![id, now],
                 )
-                .map_err(store_err)?;
+                .map_err(|e| db_err(&self.path, e))?;
         }
 
-        tx.commit().map_err(store_err)?;
+        tx.commit().map_err(|e| db_err(&self.path, e))?;
         Ok(stats)
     }
 
@@ -587,7 +601,7 @@ impl Store {
                 "UPDATE documents SET deleted = 1, synced_at = ?2 WHERE source = ?1 AND deleted = 0",
                 params![source, unix_now()],
             )
-            .map_err(store_err)
+            .map_err(|e| db_err(&self.path, e))
     }
 
     /// Live document count per source, sorted by source name.
@@ -598,11 +612,12 @@ impl Store {
                 "SELECT source, COUNT(*) FROM documents WHERE deleted = 0
                  GROUP BY source ORDER BY source",
             )
-            .map_err(store_err)?;
+            .map_err(|e| db_err(&self.path, e))?;
         let rows = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as usize)))
-            .map_err(store_err)?;
-        rows.collect::<rusqlite::Result<_>>().map_err(store_err)
+            .map_err(|e| db_err(&self.path, e))?;
+        rows.collect::<rusqlite::Result<_>>()
+            .map_err(|e| db_err(&self.path, e))
     }
 
     /// A live document by ID.
@@ -615,7 +630,7 @@ impl Store {
                 document_row,
             )
             .optional()
-            .map_err(store_err)
+            .map_err(|e| db_err(&self.path, e))
     }
 }
 
@@ -634,26 +649,20 @@ fn document_row(row: &rusqlite::Row) -> rusqlite::Result<Document> {
     })
 }
 
-/// The database file last opened, for a full disk's `path`. A synk command
-/// opens one project's store, so this is the file that filled up; passing
-/// it to every one of the store's error sites would mean a closure at each.
-static OPENED: Mutex<Option<PathBuf>> = Mutex::new(None);
-
-/// A database error; a full disk is `INSUFFICIENT_DISK` with the path, as
-/// for files.
-fn store_err(e: rusqlite::Error) -> SynkError {
+/// A database error; a full disk is `INSUFFICIENT_DISK` with the file's
+/// path, as for files.
+fn db_err(path: &Option<String>, e: rusqlite::Error) -> SynkError {
     if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) {
-        let path = OPENED
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map_or_else(|| "the store".to_owned(), |p| p.display().to_string());
-        return SynkError::new(
+        let shown = path.as_deref().unwrap_or("the store");
+        let err = SynkError::new(
             ErrorCode::InsufficientDisk,
-            format!("the disk is full: {path}: {e}"),
+            format!("the disk is full: {shown}: {e}"),
         )
-        .with_hint("free some space, then run the same command again; finished steps are kept")
-        .with_detail("path", path.into());
+        .with_hint("free some space, then run the same command again; finished steps are kept");
+        return match path {
+            Some(p) => err.with_detail("path", p.as_str().into()),
+            None => err,
+        };
     }
     SynkError::new(ErrorCode::Store, e.to_string())
 }
@@ -701,14 +710,11 @@ mod tests {
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
             None,
         );
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("synk.db");
-        Store::open(&db).unwrap();
-        let err = store_err(full);
+        let err = db_err(&Some("/p/.synk/synk.db".to_owned()), full);
         assert_eq!(err.code, ErrorCode::InsufficientDisk);
-        assert_eq!(err.details["path"], db.display().to_string());
+        assert_eq!(err.details["path"], "/p/.synk/synk.db");
         let other = rusqlite::Error::QueryReturnedNoRows;
-        assert_eq!(store_err(other).code, ErrorCode::Store);
+        assert_eq!(db_err(&None, other).code, ErrorCode::Store);
     }
 
     fn doc(id: &str, hash: &str) -> Document {

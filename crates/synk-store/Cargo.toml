@@ -11,6 +11,3 @@ repository.workspace = true
 synk-core.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
