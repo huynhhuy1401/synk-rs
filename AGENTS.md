@@ -37,7 +37,9 @@ under ~72 characters; details go in the body.
 - Types: `feat` (a user-visible feature), `fix` (a bug fix), `docs`,
   `refactor`, `perf`, `test`, `ci`, `build`, `chore`.
 - Scopes, when they help: `cli`, `pipeline`, `trainer` (the sidecar),
-  `generator`, `store`, `connectors`, `skill`, `ci`, `release`.
+  `generator`, `store`, `connectors`, `skill`, `ci`, `release`, or a
+  pipeline part: `preview`, `dataset`, `verdict`, `queries`, `export`,
+  `setup`, `ops`, `lang`.
 - A breaking change to the `--json` contract or `synk.toml`: `feat!:` or
   `fix!:`, plus a `BREAKING CHANGE:` footer saying what to do.
 - Examples: `feat(cli): add run list --limit`,
@@ -107,7 +109,10 @@ under ~72 characters; details go in the body.
   (Hugging Face cache and metadata), `ids.rs` (readable IDs), `advice.rs`,
   `queries.rs`, `report.rs` / `report_html.rs`, `catalog.toml`, the Python
   trainer (`sidecar.rs` + `sidecar/synk_sidecar.py`, protocol v2, embedded)
-  and `fake_trainer.rs` (`SYNK_FAKE_TRAINER=1`, for tests)
+  and `fake_trainer.rs` (`SYNK_FAKE_TRAINER=1`, for tests). Other
+  test-only environment hooks: `SYNK_TEST_INTERRUPT_AFTER_MS` and
+  `SYNK_TEST_INTERRUPT_FILE` (press Ctrl-C after a delay, or per line
+  added to the file), `SYNK_TEST_FREE_BYTES` (pretend free disk space)
 - `crates/synk` — CLI: `main.rs` (clap tree and the grouped help template),
   `work.rs` (train, dataset, fetch, wait, logs, cancel), `commands.rs`
   (sources, status),

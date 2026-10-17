@@ -359,6 +359,9 @@ fn sidecar_error(event: &Value, log_path: &Path) -> SynkError {
         ErrorCode::ModelNotFound => err
             .with_next("synk model list")
             .with_hint("check model.base: synk config get model.base"),
+        ErrorCode::InsufficientDisk => err
+            .with_hint("free some space, then run the same command again; finished steps are kept")
+            .with_detail("path", event["path"].clone()),
         _ => err,
     }
 }

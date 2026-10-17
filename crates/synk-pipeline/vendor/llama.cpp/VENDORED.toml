@@ -4,8 +4,11 @@
 #
 # To update: copy convert_hf_to_gguf.py, conversion/ and gguf-py/ (without
 # tests/, examples/, __pycache__/) and LICENSE from the new commit, set
-# `commit` below and LLAMA_CPP_COMMIT in src/export.rs, then run the real
-# end-to-end test (it exports to GGUF and checks the vectors).
+# `commit` below and LLAMA_CPP_COMMIT in src/export.rs, rewrite
+# ../llama.cpp.sha256 (`sha256sum` of every file here, sorted by path, run
+# from this folder), review any new network code the converter test lists,
+# then run the real end-to-end test (it exports to GGUF and checks the
+# vectors).
 source = "https://github.com/ggml-org/llama.cpp"
 commit = "711780ffc75bbc5645173ed8647a7b3f328c052a"
 license = "MIT"

@@ -108,7 +108,7 @@ const WRITE_SEARCHES: &str = "synk queries template --out searches.jsonl";
 /// A drive the run writes to would be nearly full (or is too small, with
 /// `SYNK_DISK_CHECK=warn`).
 pub fn disk_tight(volume: &crate::disk::Volume) -> Advice {
-    let gb = |b: u64| format!("{:.1} GB", b as f64 / 1e9);
+    use crate::disk::gb;
     Advice {
         code: "DISK_SPACE_TIGHT",
         severity: Severity::Warning,
@@ -159,11 +159,15 @@ pub fn predicted_power(test_documents: usize, sd: Option<f64>) -> Option<Advice>
             "assumed_sd": assumed,
             "sd_from": if sd.is_some() { "last run" } else { "default" },
         }),
-        action: command(WRITE_SEARCHES).map(|c| Action {
-            command: Some(c),
-            config: None,
-        }),
+        action: write_searches(),
         applicability: Applicability::Manual,
+    })
+}
+
+fn write_searches() -> Option<Action> {
+    command(WRITE_SEARCHES).map(|c| Action {
+        command: Some(c),
+        config: None,
     })
 }
 
@@ -325,20 +329,28 @@ pub fn train(
     ) && verdict.query_kind != "real"
     {
         let covered = real.test_documents;
+        let more_queries =
+            (crate::train::MIN_REAL_QUERIES as u64).saturating_sub(real.test_queries);
+        let more_documents = crate::train::MIN_REAL_DOCUMENTS.saturating_sub(covered);
+        let mut add = Vec::new();
+        if more_queries > 0 {
+            add.push(format!("{more_queries} more search(es)"));
+        }
+        if more_documents > 0 {
+            add.push(format!("searches about {more_documents} more document(s)"));
+        }
         out.push(Advice {
             code: "REAL_QUERIES_FEW_DOCUMENTS",
             severity: Severity::Info,
             message: format!(
-                "Your {} real searches are about {covered} document(s); they decide the verdict once there are {} or more about {}+ documents, because searches about one document rise and fall together. Write a few about other documents.",
+                "Your {} real searches are about {covered} document(s); they decide the verdict once there are {} or more about {}+ documents, because searches about one document rise and fall together. Write {}.",
                 real.test_queries,
                 crate::train::MIN_REAL_QUERIES,
                 crate::train::MIN_REAL_DOCUMENTS,
+                add.join(" and "),
             ),
-            evidence: json!({"real_queries": real.test_queries, "documents": covered, "min_queries": crate::train::MIN_REAL_QUERIES, "min_documents": crate::train::MIN_REAL_DOCUMENTS}),
-            action: command(WRITE_SEARCHES).map(|c| Action {
-                command: Some(c),
-                config: None,
-            }),
+            evidence: json!({"real_queries": real.test_queries, "documents": covered, "min_queries": crate::train::MIN_REAL_QUERIES, "min_documents": crate::train::MIN_REAL_DOCUMENTS, "more_queries": more_queries, "more_documents": more_documents}),
+            action: write_searches(),
             applicability: Applicability::Manual,
         });
     }

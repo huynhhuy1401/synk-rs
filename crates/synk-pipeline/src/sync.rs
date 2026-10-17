@@ -56,10 +56,11 @@ fn reader_changed(store: &Store) -> Result<bool> {
     })
 }
 
-fn scan(specs: &[SourceSpec], store: &Store) -> Result<Scanned> {
+/// Scans every source; `reread` reads every file again (see
+/// `reader_changed`).
+fn scan(specs: &[SourceSpec], store: &Store, reread: bool) -> Result<Scanned> {
     let mut batches = Vec::new();
     let mut warnings = Vec::new();
-    let reread = reader_changed(store)?;
     for spec in specs {
         let connector = FsConnector::new(spec)?;
         let mut known = store.known_files(connector.source())?;
@@ -94,7 +95,7 @@ fn removed(specs: &[SourceSpec], store: &Store) -> Result<Vec<String>> {
 /// What `run` would change, without changing anything.
 pub fn preview(specs: &[SourceSpec], store: &Store) -> Result<Outcome> {
     let reread = reader_changed(store)?;
-    let (batches, warnings) = scan(specs, store)?;
+    let (batches, warnings) = scan(specs, store, reread)?;
     let mut out = Outcome {
         warnings,
         removed_sources: removed(specs, store)?,
@@ -128,7 +129,7 @@ pub fn preview(specs: &[SourceSpec], store: &Store) -> Result<Outcome> {
 /// Applies every source's changes to the store.
 pub fn run(specs: &[SourceSpec], store: &mut Store) -> Result<Outcome> {
     let reread = reader_changed(store)?;
-    let (batches, warnings) = scan(specs, store)?;
+    let (batches, warnings) = scan(specs, store, reread)?;
     let mut out = Outcome {
         warnings,
         reread,

@@ -23,7 +23,8 @@ use crate::stats;
 pub const TRAIN_KIND: &str = "train";
 const TRAIN_VERSION: u32 = 3;
 pub const EVAL_KIND: &str = "eval";
-const EVAL_VERSION: u32 = 3;
+// 4: verdict reason, sign-flip p, agreement; real queries need 10 documents.
+const EVAL_VERSION: u32 = 4;
 
 /// One public set of the general check, pinned to a commit.
 pub struct GeneralSet {

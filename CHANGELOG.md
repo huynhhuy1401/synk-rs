@@ -15,18 +15,23 @@ few chunks whose detected language changed). Existing trainers keep working;
   see a typical gain, before any training.
 - `dataset.test_percent = "auto"` (the new default) holds out at least 10
   documents where possible (20%–50%); projects with ~50+ documents keep
-  exactly the old 20% split. `--sample` keeps every test document.
+  exactly the old 20% split. Adding documents never moves a test document
+  into training, except once, when the project grows big enough for the
+  plain split. `--sample` keeps every test document (leaving two chunks for
+  training).
 - A `no_clear_change` verdict says why: `reason` is `no_difference` or
   `too_few_test_documents` (inconclusive).
 - The verdict reports an exact sign-flip p-value next to the t-test
   (`permutation_p`).
 - **`synk queries template`** writes a file of documents to fill in with
   your own searches. Real searches decide the verdict at 30+ about 10+
-  documents; `agreement` and new advice (`REAL_QUERIES_FEW_DOCUMENTS`,
-  `SYNTHETIC_REAL_DISAGREE`) compare them with the generated test.
+  documents; `agreement` and new advice (`REAL_QUERIES_FEW_DOCUMENTS`, which
+  says how many more searches and documents, and `SYNTHETIC_REAL_DISAGREE`)
+  compare them with the generated test.
 - Style examples for the LLM are chosen once and kept, so importing more
   real searches no longer re-asks the LLM for every chunk
-  (`queries import --restyle` chooses again).
+  (`queries import --restyle` chooses again). The dry run says when they're
+  about to be chosen and what that costs (`style_examples_change`).
 
 ### Reliability
 
@@ -34,15 +39,18 @@ few chunks whose detected language changed). Existing trainers keep working;
   a second Ctrl-C stops at once. Exit code 130, one `CANCELLED` result with
   `details.how`; `synk train` continues the run.
 - The project lock is an OS file lock: two commands started together can't
-  both run, a killed run reads `interrupted` at once, and a laptop that slept
-  keeps its run.
+  both run (the second gets `JOB_RUNNING`, not "database is locked"), a
+  killed run reads `interrupted` at once, and a laptop that slept keeps its
+  run.
 - The trainer stops when synk stops (a stdin lifeline), and runs in its own
   process group.
 - **Disk space** is checked before downloads and training (`data.disk`,
   `INSUFFICIENT_DISK`, `DISK_SPACE_TIGHT`; `SYNK_DISK_CHECK=warn`), and a
-  full disk mid-run is reported as `INSUFFICIENT_DISK`.
+  full disk mid-run is reported as `INSUFFICIENT_DISK` with the step and
+  path.
 - GGUF export ships llama.cpp's converter inside synk: no download (it used
-  to fetch the whole repository without asking).
+  to fetch the whole repository without asking). The export result
+  (`data.converter`) and the model's README name its commit.
 - The trainer installs from hashed lock files: the same packages every time.
 - The query generator skips a chunk the LLM fails on (e.g. Ollama's "token
   repeat limit reached") instead of failing the run, and passes on the

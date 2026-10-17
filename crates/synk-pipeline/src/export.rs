@@ -119,6 +119,17 @@ pub struct Exported {
     pub ollama: Option<Value>,
     pub usage: Value,
     pub advice: Vec<Advice>,
+    /// The converter that made a GGUF file, so the export can be repeated.
+    pub converter: Option<Value>,
+}
+
+/// The shipped converter, as the export result names it.
+fn converter_info() -> Value {
+    json!({
+        "name": "llama.cpp convert_hf_to_gguf.py",
+        "source": "https://github.com/ggml-org/llama.cpp",
+        "commit": LLAMA_CPP_COMMIT,
+    })
 }
 
 /// Empties `out` when allowed, or fails if it holds anything.
@@ -283,7 +294,12 @@ pub fn export(
             let modelfile = out.join("Modelfile");
             fs::write(&modelfile, "FROM ./model.gguf\n")
                 .map_err(|e| SynkError::io(modelfile.display(), e))?;
-            write_readme(out, &readme)?;
+            write_readme(
+                out,
+                &format!(
+                    "{readme}\nConverted to GGUF ({quant}) with llama.cpp's convert_hf_to_gguf.py at commit {LLAMA_CPP_COMMIT}.\n"
+                ),
+            )?;
             if has_prompts {
                 advice.push(Advice {
                     code: "PREFIX_DROPPED_BY_TARGET",
@@ -370,6 +386,7 @@ pub fn export(
         ollama,
         usage,
         advice,
+        converter: (req.format == Format::Gguf).then(converter_info),
     })
 }
 
@@ -559,5 +576,57 @@ mod tests {
         fs::write(dir.join("marker"), "x").unwrap();
         assert_eq!(converter_dir_in(home.path()).unwrap(), dir);
         assert!(dir.join("marker").is_file());
+    }
+
+    #[test]
+    fn the_shipped_converter_matches_its_manifest() {
+        use sha2::{Digest, Sha256};
+        let manifest = include_str!("../vendor/llama.cpp.sha256");
+        let expected: Vec<(&str, &str)> = manifest
+            .lines()
+            .map(|l| {
+                let (hash, path) = l.split_once("  ").expect("`<sha256>  <path>`");
+                (path, hash)
+            })
+            .collect();
+        let shipped: Vec<(&str, String)> = converter::FILES
+            .iter()
+            .map(|(path, bytes)| (*path, format!("{:x}", Sha256::digest(bytes))))
+            .collect();
+        let shipped: Vec<(&str, &str)> = shipped.iter().map(|(p, h)| (*p, h.as_str())).collect();
+        assert_eq!(shipped, expected);
+    }
+
+    #[test]
+    fn the_shipped_converter_goes_online_only_where_synk_never_lets_it() {
+        // Network code in the converter, by file. It runs only with
+        // `--remote` (which synk never passes) or through huggingface_hub
+        // (which HF_HUB_OFFLINE=1 stops). A new entry needs that review.
+        let network = [
+            "import requests",
+            "urlopen",
+            "from huggingface_hub",
+            "import socket",
+        ];
+        let found: Vec<&str> = converter::FILES
+            .iter()
+            .filter(|(path, bytes)| {
+                let text = String::from_utf8_lossy(bytes);
+                path.ends_with(".py") && network.iter().any(|n| text.contains(n))
+            })
+            .map(|(path, _)| *path)
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "conversion/deepseek.py",
+                "conversion/lev.py",
+                "convert_hf_to_gguf.py",
+                "gguf-py/gguf/utility.py",
+            ]
+        );
+        let sidecar = include_str!("../sidecar/synk_sidecar.py");
+        assert!(sidecar.contains("HF_HUB_OFFLINE=\"1\""));
+        assert!(!sidecar.contains("\"--remote\""));
     }
 }

@@ -14,6 +14,11 @@ pub const TIGHT_MARGIN: u64 = 2_000_000_000;
 /// The trainer environment is about this many times its download once
 /// installed (PyTorch's wheels are compressed).
 pub const TRAINER_UNPACKED: u64 = 3;
+/// A dataset is about this many times its documents' text (the corpus of
+/// chunks, which overlap, plus the queries and their cache), plus
+/// DATASET_FIXED_BYTES. **[unverified]**
+pub const DATASET_PER_TEXT_BYTE: u64 = 2;
+pub const DATASET_FIXED_BYTES: u64 = 1_000_000;
 /// Bytes per parameter a full fine-tuning run keeps: the fp32 model in the
 /// checkpoint, AdamW's two moments, the best epoch's copy and the final
 /// model.
@@ -49,16 +54,24 @@ impl Volume {
     }
 }
 
+/// Whether `SYNK_DISK_CHECK=warn` turned a too-small drive into a warning.
+pub fn warn_only() -> bool {
+    std::env::var("SYNK_DISK_CHECK").as_deref() == Ok("warn")
+}
+
+/// Bytes for people, e.g. `2.5 GB`.
+pub fn gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1e9)
+}
+
 /// Groups the needs by drive and reads each drive's free space. A place
 /// whose drive can't be read is left out (no false alarms).
 pub fn check(needs: Vec<Need>) -> Vec<Volume> {
-    let mut volumes: Vec<(u64, Volume)> = Vec::new();
+    let mut volumes: Vec<(String, Volume)> = Vec::new();
     for need in needs.into_iter().filter(|n| n.bytes > 0) {
-        let Some((free, total)) = space(&need.path) else {
+        let (Some((free, _)), Some(id)) = (space(&need.path), drive(&need.path)) else {
             continue;
         };
-        // Same total and free space: the same drive.
-        let id = total ^ free.rotate_left(32);
         match volumes.iter_mut().find(|(v, _)| *v == id) {
             Some((_, volume)) => {
                 volume.need_bytes += need.bytes;
@@ -76,6 +89,26 @@ pub fn check(needs: Vec<Need>) -> Vec<Volume> {
         }
     }
     volumes.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Which drive holds `path` (or its closest existing parent): the device
+/// on Unix, the drive letter or share on Windows. Free space can't tell
+/// drives apart: it changes while synk reads it.
+fn drive(path: &Path) -> Option<String> {
+    let existing = path.ancestors().find(|p| p.exists())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(std::fs::metadata(existing).ok()?.dev().to_string())
+    }
+    #[cfg(not(unix))]
+    {
+        let absolute = std::path::absolute(existing).ok()?;
+        match absolute.components().next()? {
+            std::path::Component::Prefix(p) => Some(p.as_os_str().to_string_lossy().to_uppercase()),
+            _ => Some(String::new()),
+        }
+    }
 }
 
 /// Free (to this user) and total bytes of the drive holding `path`, or of

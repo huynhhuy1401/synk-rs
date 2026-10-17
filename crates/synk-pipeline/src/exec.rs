@@ -106,210 +106,224 @@ pub fn run(
     let render = &mut render;
     let kind = op.record().kind;
 
-    for sp in &preview.steps {
-        op.check_cancel()?;
-        let step = sp.step;
-        if sp.action == Action::Skipped {
-            continue;
-        }
-        match step {
-            // What `synk fetch` does. A preview that still lists a download
-            // is refused before an operation starts; this is a safeguard.
-            Step::Trainer | Step::Models | Step::Generator => {
-                if sp.action == Action::Run {
-                    return Err(SynkError::new(
-                        ErrorCode::ConsentRequired,
-                        format!("{} still needs a download", step.as_str()),
-                    )
-                    .with_next("synk train --dry-run"));
-                }
-                op.step(step.as_str(), "cached", None, json!({}));
+    // The step that was running, for an INSUFFICIENT_DISK error.
+    let mut current = None;
+    let steps = (|| -> Result<()> {
+        for sp in &preview.steps {
+            op.check_cancel()?;
+            let step = sp.step;
+            current = Some(step);
+            if sp.action == Action::Skipped {
                 continue;
             }
-            Step::Eval => continue,
-            _ => {}
-        }
-        emit(
-            op,
-            render,
-            step,
-            &json!({"event": "step", "status": "start", "action": sp.action}),
-        );
-        let started = Instant::now();
-        let elapsed = || Some(started.elapsed().as_secs());
-        match step {
-            Step::Sync => {
-                let mut store = ws.open_store()?;
-                let outcome = sync::run(&ws.sources, &mut store)?;
-                op.step(
-                    step.as_str(),
-                    if outcome.changed() { "ran" } else { "cached" },
-                    elapsed(),
-                    json!(outcome.totals),
-                );
-                out.sync = Some(outcome);
+            match step {
+                // What `synk fetch` does. A preview that still lists a download
+                // is refused before an operation starts; this is a safeguard.
+                Step::Trainer | Step::Models | Step::Generator => {
+                    if sp.action == Action::Run {
+                        return Err(SynkError::new(
+                            ErrorCode::ConsentRequired,
+                            format!("{} still needs a download", step.as_str()),
+                        )
+                        .with_next("synk train --dry-run"));
+                    }
+                    op.step(step.as_str(), "cached", None, json!({}));
+                    continue;
+                }
+                Step::Eval => continue,
+                _ => {}
             }
-            Step::Dataset => {
-                let store = ws.open_store()?;
-                let artifacts = ws.artifacts();
-                let (dataset_cfg, chunking, generator) =
-                    graph::dataset_inputs(ws, &store, &preview.model, preview.options.sample)?;
-                let prepared = dataset::prepare(
-                    &store,
-                    &dataset_cfg,
-                    ws.cfg.generator.queries_per_chunk,
-                    &chunking,
-                    &generator,
-                )?;
-                let outcome = dataset::build(
-                    &store,
-                    &artifacts,
-                    prepared,
-                    &generator,
-                    force == Some(Step::Dataset),
-                    &mut |done, total| {
-                        emit(
-                            op,
-                            render,
-                            step,
-                            &json!({
-                                "event": "progress", "stage": "generate",
-                                "step": done, "total": total, "unit": "chunks",
-                            }),
-                        );
-                        !op.cancel_requested()
-                    },
-                )?;
-                let s = &outcome.manifest.summary;
-                let calls = s["chunks"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    .saturating_sub(s["cached_chunks"].as_u64().unwrap_or(0));
-                if !outcome.reused && calls > 0 {
-                    graph::record_speed(
-                        &graph::llm_speed_key(&ws.cfg),
-                        started.elapsed().as_secs_f64() / calls as f64,
+            emit(
+                op,
+                render,
+                step,
+                &json!({"event": "step", "status": "start", "action": sp.action}),
+            );
+            let started = Instant::now();
+            let elapsed = || Some(started.elapsed().as_secs());
+            match step {
+                Step::Sync => {
+                    let mut store = ws.open_store()?;
+                    let outcome = sync::run(&ws.sources, &mut store)?;
+                    op.step(
+                        step.as_str(),
+                        if outcome.changed() { "ran" } else { "cached" },
+                        elapsed(),
+                        json!(outcome.totals),
                     );
-                    if !generator::is_local(&ws.cfg.generator.base_url) {
-                        out.egress = Some(json!({
-                            "host": ws.cfg.generator.base_url,
-                            "chunks": calls,
-                        }));
-                    }
+                    out.sync = Some(outcome);
                 }
-                out.advice.extend(advice::dataset(s, &ws.cfg));
-                let id = ids::number_dataset(&artifacts, &outcome.manifest)?;
-                let key = outcome.manifest.key.clone();
-                op.update(|r| {
-                    r.dataset = Some(id.clone());
-                    if kind == OpKind::Dataset {
-                        r.key = Some(key);
-                    }
-                });
-                op.step(
-                    step.as_str(),
-                    if outcome.reused { "cached" } else { "ran" },
-                    (!outcome.reused).then(|| started.elapsed().as_secs()),
-                    json!({"dataset": id, "queries": s["queries"]}),
-                );
-                out.dataset = Some((id, outcome.manifest));
-            }
-            Step::Train => {
-                graph::check_training_space(ws, &preview.model)?;
-                let artifacts = ws.artifacts();
-                let Some((_, dataset)) = out.dataset.clone() else {
-                    return Err(SynkError::new(
-                        ErrorCode::DatasetNotFound,
-                        "no dataset to train on",
-                    ));
-                };
-                let dataset_dir = artifacts.dir(dataset::KIND, &dataset.key);
-                let env = ws.trainer()?;
-                let opts = train::Options {
-                    resume: true,
-                    force: force == Some(Step::Train),
-                    device: None,
-                    reranker: ws.reranker()?,
-                    stop_file: Some(op.cancel_file()),
-                    general_check: ws.cfg.eval.general_check,
-                    force_eval: force == Some(Step::Eval),
-                };
-                let device = ws
-                    .cfg
-                    .trainer
-                    .device
-                    .clone()
-                    .or_else(|| env.describe["devices"][0].as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "cpu".to_owned());
-                let outcome = train::run(
-                    &artifacts,
-                    &dataset,
-                    &dataset_dir,
-                    &preview.model,
-                    &ws.cfg.trainer,
-                    &env,
-                    &opts,
-                    &mut |e| emit(op, render, step, e),
-                )?;
-                if !outcome.train_reused {
-                    let steps = outcome.train.summary["steps"].as_u64().unwrap_or(0);
-                    if steps > 0 {
+                Step::Dataset => {
+                    let store = ws.open_store()?;
+                    let artifacts = ws.artifacts();
+                    let (dataset_cfg, chunking, generator) =
+                        graph::dataset_inputs(ws, &store, &preview.model, preview.options.sample)?;
+                    let prepared = dataset::prepare(
+                        &store,
+                        &dataset_cfg,
+                        ws.cfg.generator.queries_per_chunk,
+                        &chunking,
+                        &generator,
+                    )?;
+                    let outcome = dataset::build(
+                        &store,
+                        &artifacts,
+                        prepared,
+                        &generator,
+                        force == Some(Step::Dataset),
+                        &mut |done, total| {
+                            emit(
+                                op,
+                                render,
+                                step,
+                                &json!({
+                                    "event": "progress", "stage": "generate",
+                                    "step": done, "total": total, "unit": "chunks",
+                                }),
+                            );
+                            !op.cancel_requested()
+                        },
+                    )?;
+                    let s = &outcome.manifest.summary;
+                    let calls = s["chunks"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .saturating_sub(s["cached_chunks"].as_u64().unwrap_or(0));
+                    if !outcome.reused && calls > 0 {
                         graph::record_speed(
-                            &graph::train_speed_key(&preview.model, &device),
-                            started.elapsed().as_secs_f64() / steps as f64,
+                            &graph::llm_speed_key(&ws.cfg),
+                            started.elapsed().as_secs_f64() / calls as f64,
                         );
+                        if !generator::is_local(&ws.cfg.generator.base_url) {
+                            out.egress = Some(json!({
+                                "host": ws.cfg.generator.base_url,
+                                "chunks": calls,
+                            }));
+                        }
                     }
-                }
-                // Another run made this model already: say so, and keep
-                // this run's own ID.
-                let key = outcome.train.key.clone();
-                let me = op.id();
-                let earlier = ws
-                    .ops()
-                    .run_for_key(&key)?
-                    .filter(|r| r.id != me && r.state == State::Succeeded);
-                out.same_as = earlier.map(|r| r.id);
-                let id = if kind == OpKind::Run {
-                    let same_as = out.same_as.clone();
+                    out.advice.extend(advice::dataset(s, &ws.cfg));
+                    let id = ids::number_dataset(&artifacts, &outcome.manifest)?;
+                    let key = outcome.manifest.key.clone();
                     op.update(|r| {
-                        r.key = Some(key);
-                        r.same_as = same_as;
+                        r.dataset = Some(id.clone());
+                        if kind == OpKind::Dataset {
+                            r.key = Some(key);
+                        }
                     });
-                    me
-                } else {
-                    ids::id(&artifacts, ids::Kind::Run, &outcome.train)?
-                };
-                op.step(
-                    "train",
-                    if outcome.train_reused {
-                        "cached"
+                    op.step(
+                        step.as_str(),
+                        if outcome.reused { "cached" } else { "ran" },
+                        (!outcome.reused).then(|| started.elapsed().as_secs()),
+                        json!({"dataset": id, "queries": s["queries"]}),
+                    );
+                    out.dataset = Some((id, outcome.manifest));
+                }
+                Step::Train => {
+                    graph::check_training_space(ws, &preview.model)?;
+                    let artifacts = ws.artifacts();
+                    let Some((_, dataset)) = out.dataset.clone() else {
+                        return Err(SynkError::new(
+                            ErrorCode::DatasetNotFound,
+                            "no dataset to train on",
+                        ));
+                    };
+                    let dataset_dir = artifacts.dir(dataset::KIND, &dataset.key);
+                    let env = ws.trainer()?;
+                    let opts = train::Options {
+                        resume: true,
+                        force: force == Some(Step::Train),
+                        device: None,
+                        reranker: ws.reranker()?,
+                        stop_file: Some(op.cancel_file()),
+                        general_check: ws.cfg.eval.general_check,
+                        force_eval: force == Some(Step::Eval),
+                    };
+                    let device = ws
+                        .cfg
+                        .trainer
+                        .device
+                        .clone()
+                        .or_else(|| env.describe["devices"][0].as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "cpu".to_owned());
+                    let outcome = train::run(
+                        &artifacts,
+                        &dataset,
+                        &dataset_dir,
+                        &preview.model,
+                        &ws.cfg.trainer,
+                        &env,
+                        &opts,
+                        &mut |e| emit(op, render, step, e),
+                    )?;
+                    if !outcome.train_reused {
+                        let steps = outcome.train.summary["steps"].as_u64().unwrap_or(0);
+                        if steps > 0 {
+                            graph::record_speed(
+                                &graph::train_speed_key(&preview.model, &device),
+                                started.elapsed().as_secs_f64() / steps as f64,
+                            );
+                        }
+                    }
+                    // Another run made this model already: say so, and keep
+                    // this run's own ID.
+                    let key = outcome.train.key.clone();
+                    let me = op.id();
+                    let earlier = ws
+                        .ops()
+                        .run_for_key(&key)?
+                        .filter(|r| r.id != me && r.state == State::Succeeded);
+                    out.same_as = earlier.map(|r| r.id);
+                    let id = if kind == OpKind::Run {
+                        let same_as = out.same_as.clone();
+                        op.update(|r| {
+                            r.key = Some(key);
+                            r.same_as = same_as;
+                        });
+                        me
                     } else {
-                        "ran"
-                    },
-                    (!outcome.train_reused).then(|| started.elapsed().as_secs()),
-                    json!({"run": id}),
-                );
-                op.step(
-                    "eval",
-                    "ran",
-                    None,
-                    json!({"outcome": outcome.verdict.outcome}),
-                );
-                out.general = advice::general_verdicts(&outcome.eval.summary);
-                out.advice.extend(advice::train(
-                    &outcome.train.summary,
-                    &outcome.verdict,
-                    &out.general,
-                    &ws.cfg,
-                ));
-                out.verdict = Some(outcome.verdict);
-                out.run = Some((id, outcome.train));
+                        ids::id(&artifacts, ids::Kind::Run, &outcome.train)?
+                    };
+                    op.step(
+                        "train",
+                        if outcome.train_reused {
+                            "cached"
+                        } else {
+                            "ran"
+                        },
+                        (!outcome.train_reused).then(|| started.elapsed().as_secs()),
+                        json!({"run": id}),
+                    );
+                    op.step(
+                        "eval",
+                        "ran",
+                        None,
+                        json!({"outcome": outcome.verdict.outcome}),
+                    );
+                    out.general = advice::general_verdicts(&outcome.eval.summary);
+                    out.advice.extend(advice::train(
+                        &outcome.train.summary,
+                        &outcome.verdict,
+                        &out.general,
+                        &ws.cfg,
+                    ));
+                    out.verdict = Some(outcome.verdict);
+                    out.run = Some((id, outcome.train));
+                }
+                Step::Trainer | Step::Models | Step::Generator | Step::Eval => {}
             }
-            Step::Trainer | Step::Models | Step::Generator | Step::Eval => {}
+            if preview.options.target == step {
+                break;
+            }
         }
-        if preview.options.target == step {
-            break;
-        }
+        Ok(())
+    })();
+    if let Err(e) = steps {
+        return Err(match current {
+            Some(step) if e.code == ErrorCode::InsufficientDisk => {
+                e.with_detail("step", json!(step.as_str()))
+            }
+            _ => e,
+        });
     }
     let mut seen = std::collections::HashSet::new();
     out.advice.retain(|a| seen.insert(a.code));

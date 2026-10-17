@@ -711,6 +711,9 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
     // Test documents, known from the documents alone: also on a first run,
     // before the LLM is there to plan the rest of the dataset.
     let mut test_documents = None;
+    let mut style_change = false;
+    // The documents' text, for the dataset's disk estimate.
+    let mut text_bytes = 0;
     if needed.contains(&Step::Dataset) {
         // The dataset as it will be after the sync: sync inside a savepoint,
         // look, and roll back. Nothing is saved.
@@ -720,9 +723,11 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
             if live.len() < 2 {
                 return Ok(None);
             }
-            test_documents = dataset::test_document_ids(&live, ws.cfg.dataset.test_percent)
+            style_change = dataset::style_examples_change(store)?;
+            text_bytes = live.iter().map(|d| d.text.len() as u64).sum();
+            test_documents = dataset::test_document_ids(store, &live, ws.cfg.dataset.test_percent)
                 .ok()
-                .map(|t| t.len());
+                .map(|t| dataset::sampled_test_documents(t.len(), opts.sample));
             Ok(Some(match dataset_inputs(ws, store, &model, opts.sample) {
                 Err(e) => Err(e),
                 Ok((dataset_cfg, chunking, generator)) => {
@@ -759,9 +764,10 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
                     "llm_calls": calls,
                     "chunks_with_queries": p["cached_chunks"],
                     "generator": ws.cfg.generator.model,
+                    "style_examples_change": style_change,
                 });
                 let existing = p["existing"] == true;
-                let (action, why) = if forced(Step::Dataset) {
+                let (action, mut why) = if forced(Step::Dataset) {
                     (Action::Run, vec!["forced".to_owned()])
                 } else if existing {
                     (Action::Cached, vec![])
@@ -773,6 +779,11 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
                         vec!["settings changed since the last dataset".to_owned()],
                     )
                 };
+                if style_change && action == Action::Run {
+                    why.push(format!(
+                        "style examples are chosen from your real searches, so the LLM is asked again for every chunk ({calls} calls)"
+                    ));
+                }
                 let _ = generator_key;
                 if let Some(n) = p["test_documents"].as_u64() {
                     test_documents = Some(n as usize);
@@ -1075,9 +1086,9 @@ pub fn make(ws: &Workspace, opts: &Options) -> Result<Preview> {
     }
     b.steps.sort_by_key(|s| s.step);
 
-    let disk = disk_needs(ws, &model, &b.consent, &b.steps);
+    let disk = disk_needs(ws, &model, &b.consent, &b.steps, text_bytes);
     for volume in &disk {
-        if volume.short() && std::env::var("SYNK_DISK_CHECK").as_deref() != Ok("warn") {
+        if volume.short() && !crate::disk::warn_only() {
             b.blockers.push(insufficient_disk(volume));
         } else if volume.short() || volume.tight() {
             advice.push(crate::advice::disk_tight(volume));
@@ -1117,11 +1128,11 @@ fn disk_needs(
     model: &ModelSpec,
     consent: &[Consent],
     steps: &[StepPlan],
+    text_bytes: u64,
 ) -> Vec<crate::disk::Volume> {
     use crate::disk::{self, Need};
     let mut needs = Vec::new();
-    let local_llm = ws.cfg.generator.base_url.contains("localhost")
-        || ws.cfg.generator.base_url.contains("127.0.0.1");
+    let local_llm = crate::generator::is_local(&ws.cfg.generator.base_url);
     for c in consent.iter().filter(|c| c.kind == "download") {
         let (Some(name), Some(bytes)) = (c.name.as_deref(), c.bytes) else {
             continue;
@@ -1144,9 +1155,19 @@ fn disk_needs(
             });
         }
     }
-    let trains = steps
-        .iter()
-        .any(|s| s.step == Step::Train && s.action == Action::Run);
+    let runs = |step| {
+        steps
+            .iter()
+            .any(|s| s.step == step && s.action == Action::Run)
+    };
+    if runs(Step::Dataset) {
+        needs.push(Need {
+            what: "the dataset".to_owned(),
+            path: ws.data_dir.join("artifacts"),
+            bytes: text_bytes * disk::DATASET_PER_TEXT_BYTE + disk::DATASET_FIXED_BYTES,
+        });
+    }
+    let trains = runs(Step::Train);
     if trains {
         needs.extend(training_need(ws, model));
     }
@@ -1185,7 +1206,7 @@ pub fn training_need(ws: &Workspace, model: &ModelSpec) -> Option<crate::disk::N
 /// Before training starts (the dataset step may have taken hours): fails
 /// with `INSUFFICIENT_DISK` if its checkpoints won't fit.
 pub fn check_training_space(ws: &Workspace, model: &ModelSpec) -> Result<()> {
-    if std::env::var("SYNK_DISK_CHECK").as_deref() == Ok("warn") {
+    if crate::disk::warn_only() {
         return Ok(());
     }
     let volumes = crate::disk::check(training_need(ws, model).into_iter().collect());
@@ -1196,7 +1217,7 @@ pub fn check_training_space(ws: &Workspace, model: &ModelSpec) -> Result<()> {
 }
 
 fn insufficient_disk(volume: &crate::disk::Volume) -> SynkError {
-    let gb = |b: u64| format!("{:.1} GB", b as f64 / 1e9);
+    use crate::disk::gb;
     let what: Vec<String> = volume
         .needs
         .iter()

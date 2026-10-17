@@ -259,8 +259,7 @@ pub fn style_pool(store: &Store) -> Result<Vec<synk_store::RealQuery>> {
         return Ok(chosen);
     }
     let mut pool = real;
-    let n = (pool.len() / 4).min(MAX_STYLE_EXAMPLES);
-    pool.truncate(n);
+    pool.truncate(style_examples(pool.len()));
     if !pool.is_empty() {
         let ids: Vec<i64> = pool.iter().map(|q| q.id).collect();
         store.set_style_queries(&ids)?;
@@ -268,14 +267,40 @@ pub fn style_pool(store: &Store) -> Result<Vec<synk_store::RealQuery>> {
     Ok(pool)
 }
 
-/// The document IDs of the test split, in the order `split_documents`
-/// considers them (for `synk queries template`).
-pub fn test_document_ids(docs: &[Document], test_percent: AutoOr<u8>) -> Result<Vec<String>> {
-    Ok(split_documents(docs, test_percent)?
-        .into_iter()
-        .filter(|(_, s)| *s == Split::Test)
-        .map(|(id, _)| id)
-        .collect())
+/// How many of `real` queries become style examples.
+fn style_examples(real: usize) -> usize {
+    (real / 4).min(MAX_STYLE_EXAMPLES)
+}
+
+/// Whether the next dataset chooses the style examples (none is chosen
+/// yet, and there are enough real queries), which changes every chunk's
+/// prompt and so re-asks the LLM for all of them.
+pub fn style_examples_change(store: &Store) -> Result<bool> {
+    let real = store.real_queries()?;
+    Ok(!real.iter().any(|q| q.style) && style_examples(real.len()) > 0)
+}
+
+/// The document IDs of the test split (for the dry run and
+/// `synk queries template`). Reads the store, never writes it.
+pub fn test_document_ids(
+    store: &Store,
+    docs: &[Document],
+    test_percent: AutoOr<u8>,
+) -> Result<Vec<String>> {
+    Ok(
+        split_documents(docs, test_percent, remembered_threshold(store)?)?
+            .sides
+            .into_iter()
+            .filter(|(_, s)| *s == Split::Test)
+            .map(|(id, _)| id)
+            .collect(),
+    )
+}
+
+fn remembered_threshold(store: &Store) -> Result<Option<u64>> {
+    Ok(store
+        .meta(AUTO_THRESHOLD_META)?
+        .and_then(|v| v.parse().ok()))
 }
 
 /// The headings above `chunk` in `doc_text`, outermost first.
@@ -326,7 +351,11 @@ pub fn prepare(
             first
         })
         .collect();
-    let splits = split_documents(&docs, cfg.test_percent)?;
+    let split = split_documents(&docs, cfg.test_percent, remembered_threshold(store)?)?;
+    if cfg.test_percent.is_auto() {
+        store.set_meta(AUTO_THRESHOLD_META, &split.threshold.to_string())?;
+    }
+    let splits = split.sides;
 
     let mut candidates = Vec::new();
     for doc in &docs {
@@ -378,6 +407,8 @@ pub fn prepare(
         // How documents were turned into text (NFC since 2).
         "reader": synk_connectors::readers::READER_VERSION,
         "test_percent": cfg.test_percent,
+        // Hash buckets (of 10 000) below this are test documents.
+        "test_threshold": split.threshold,
         "max_chunks": cfg.max_chunks,
         "generator": generator.key(),
         "queries_per_chunk": per_chunk,
@@ -588,9 +619,10 @@ fn queries_for(
 }
 
 /// Takes `max` chunks. The verdict's power comes from the number of test
-/// documents, so every test document keeps at least one chunk (while there
-/// is room), and the test's share of the sample is spread evenly over
-/// them; training chunks fill the rest. Chunk IDs are hashes, so taking the
+/// documents, so every test document keeps at least one chunk (while two
+/// chunks of the sample are left for training; see `sampled_test_documents`),
+/// and the test's share of the sample is spread evenly over them; training
+/// chunks fill the rest. Chunk IDs are hashes, so taking the
 /// first chunks is a stable random sample.
 fn sample(chunks: Vec<Chunk>, max: usize) -> Vec<Chunk> {
     if chunks.len() <= max {
@@ -603,14 +635,14 @@ fn sample(chunks: Vec<Chunk>, max: usize) -> Vec<Chunk> {
     for c in &test {
         by_doc.entry(c.doc.as_str()).or_default().push(c);
     }
-    // The test's proportional share, but at least one chunk per test
-    // document, and never more than half the sample: training needs
-    // examples too.
+    // The test's proportional share, at most half the sample (training
+    // needs examples too) but at least one chunk per test document.
     let share = (max * test.len() + total / 2) / total;
     let budget = share
+        .min(max / 2)
         .max(by_doc.len())
         .min(test.len())
-        .min((max / 2).max(1));
+        .min(max_test_chunks(max));
     let mut keep: HashSet<&str> = HashSet::new();
     let mut taken = 0;
     for round in 0.. {
@@ -635,6 +667,19 @@ fn sample(chunks: Vec<Chunk>, max: usize) -> Vec<Chunk> {
     out.extend(train.into_iter().take(train_n));
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
+}
+
+/// The most test chunks a sample of `max` keeps: all but two, which go to
+/// training (it needs at least two queries).
+fn max_test_chunks(max: usize) -> usize {
+    max.saturating_sub(2).max(1)
+}
+
+/// How many of `test_documents` a `--sample` of `max` chunks keeps.
+pub fn sampled_test_documents(test_documents: usize, max: Option<usize>) -> usize {
+    max.map_or(test_documents, |max| {
+        test_documents.min(max_test_chunks(max))
+    })
 }
 
 /// What `build` would do, without writing the dataset. Up to `samples`
@@ -826,7 +871,13 @@ pub fn build(
 /// was seen in training. The split hashes the document's path within its
 /// source rather than its ID, which embeds the source's name: renaming a
 /// source must not reshuffle the split and leak test data into training.
-fn split_documents(docs: &[Document], test_percent: AutoOr<u8>) -> Result<BTreeMap<String, Split>> {
+/// A document is a test document when its hash bucket (of 10 000) is below
+/// the threshold; for `auto`, see `auto_threshold`.
+fn split_documents(
+    docs: &[Document],
+    test_percent: AutoOr<u8>,
+    remembered: Option<u64>,
+) -> Result<DocumentSplit> {
     if docs.len() < 2 {
         return Err(SynkError::new(
             ErrorCode::DatasetTooSmall,
@@ -834,13 +885,15 @@ fn split_documents(docs: &[Document], test_percent: AutoOr<u8>) -> Result<BTreeM
         )
         .with_hint("add documents: synk source add <path>, then synk train"));
     }
-    let bucket = |doc: &Document| {
-        let hash = blake3::hash(doc.rel_path.as_bytes());
-        u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes")) % 10_000
+    let threshold = match test_percent.value() {
+        Some(percent) => u64::from(percent.min(100)) * 100,
+        None => {
+            let mut buckets: Vec<u64> = docs.iter().map(bucket).collect();
+            buckets.sort_unstable();
+            auto_threshold(&buckets, remembered)
+        }
     };
-    let percent = test_percent.value().unwrap_or(DEFAULT_TEST_PERCENT);
-    let threshold = u64::from(percent.min(100)) * 100;
-    let mut splits: BTreeMap<String, Split> = docs
+    let mut sides: BTreeMap<String, Split> = docs
         .iter()
         .map(|d| {
             let split = if bucket(d) < threshold {
@@ -851,23 +904,9 @@ fn split_documents(docs: &[Document], test_percent: AutoOr<u8>) -> Result<BTreeM
             (d.id.clone(), split)
         })
         .collect();
-    // `auto` on a small project: top up the test with the next documents in
-    // the same hash order, so it reaches AUTO_MIN_TEST_DOCUMENTS (at most
-    // half). With enough documents this is exactly the 20% split.
-    if test_percent.is_auto() {
-        let tests = splits.values().filter(|s| **s == Split::Test).count();
-        let want = AUTO_MIN_TEST_DOCUMENTS
-            .min(docs.len() * AUTO_MAX_TEST_PERCENT / 100)
-            .max(tests);
-        let mut order: Vec<&Document> = docs.iter().collect();
-        order.sort_by(|a, b| bucket(a).cmp(&bucket(b)).then(a.rel_path.cmp(&b.rel_path)));
-        for d in order.into_iter().take(want) {
-            splits.insert(d.id.clone(), Split::Test);
-        }
-    }
     // Small projects can land entirely on one side; move the document
     // closest to the threshold so both splits exist.
-    let tests = splits.values().filter(|s| **s == Split::Test).count();
+    let tests = sides.values().filter(|s| **s == Split::Test).count();
     if tests == 0 || tests == docs.len() {
         let want = if tests == 0 {
             Split::Test
@@ -878,9 +917,49 @@ fn split_documents(docs: &[Document], test_percent: AutoOr<u8>) -> Result<BTreeM
             .iter()
             .min_by_key(|d| bucket(d).abs_diff(threshold))
             .expect("at least 2 documents");
-        splits.insert(doc.id.clone(), want);
+        sides.insert(doc.id.clone(), want);
     }
-    Ok(splits)
+    Ok(DocumentSplit { sides, threshold })
+}
+
+/// Each document's side, and the threshold that decided it.
+struct DocumentSplit {
+    sides: BTreeMap<String, Split>,
+    threshold: u64,
+}
+
+/// The meta key holding the threshold the last `auto` dataset used.
+const AUTO_THRESHOLD_META: &str = "auto_test_threshold";
+
+fn bucket(doc: &Document) -> u64 {
+    let hash = blake3::hash(doc.rel_path.as_bytes());
+    u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes")) % 10_000
+}
+
+/// `auto`'s threshold, given every document's bucket in ascending order and
+/// the threshold the last `auto` dataset used. Once the plain 20% split
+/// holds out AUTO_MIN_TEST_DOCUMENTS, it is exactly that split. Before that,
+/// it keeps the last threshold while that still holds out enough documents,
+/// so adding documents doesn't move a test document into training (a kept
+/// threshold can hold out a little over half: stability wins); otherwise
+/// it takes the smallest threshold that holds out enough, at most half. A
+/// test document moves into training only once: when the project grows big
+/// enough for the plain split.
+fn auto_threshold(buckets: &[u64], remembered: Option<u64>) -> u64 {
+    let plain = u64::from(DEFAULT_TEST_PERCENT) * 100;
+    let below = |t: u64| buckets.partition_point(|b| *b < t);
+    if below(plain) >= AUTO_MIN_TEST_DOCUMENTS {
+        return plain;
+    }
+    let most = buckets.len() * AUTO_MAX_TEST_PERCENT / 100;
+    let want = AUTO_MIN_TEST_DOCUMENTS.min(most);
+    if let Some(t) = remembered.filter(|t| *t > plain && below(*t) >= want) {
+        return t;
+    }
+    match want {
+        0 => plain,
+        _ => (buckets[want - 1] + 1).max(plain),
+    }
 }
 
 fn write_corpus(dir: &Path, chunks: &[Chunk]) -> Result<()> {
@@ -1152,6 +1231,8 @@ mod tests {
             ..DatasetConfig::default()
         };
         let prepared = prepare(&store, &cfg, AutoOr::Value(1), &chunking(), &generator).unwrap();
+        // Every test document would keep a chunk, but the sample leaves two
+        // chunks for training.
         assert_eq!(prepared.count(Split::Train), 2);
         assert_eq!(prepared.count(Split::Test), 1);
 
@@ -1268,24 +1349,17 @@ mod tests {
             },
         };
         for percent in [0, 100] {
-            let splits = split_documents(
+            let splits = sides(
                 &[doc("a", "x.md"), doc("a", "y.md")],
                 AutoOr::Value(percent),
-            )
-            .unwrap();
+            );
             assert!(splits.values().any(|s| *s == Split::Test));
             assert!(splits.values().any(|s| *s == Split::Train));
         }
         let docs_a: Vec<_> = (0..20).map(|i| doc("a", &format!("{i}.md"))).collect();
         let docs_b: Vec<_> = (0..20).map(|i| doc("b", &format!("{i}.md"))).collect();
-        let a: Vec<_> = split_documents(&docs_a, AutoOr::Value(20))
-            .unwrap()
-            .into_values()
-            .collect();
-        let b: Vec<_> = split_documents(&docs_b, AutoOr::Value(20))
-            .unwrap()
-            .into_values()
-            .collect();
+        let a: Vec<_> = sides(&docs_a, AutoOr::Value(20)).into_values().collect();
+        let b: Vec<_> = sides(&docs_b, AutoOr::Value(20)).into_values().collect();
         assert_eq!(a, b);
     }
 
@@ -1316,30 +1390,48 @@ mod tests {
 
     #[test]
     fn auto_holds_out_at_least_ten_documents_but_at_most_half() {
-        let auto = |n| tests_in(&split_documents(&docs(n), AutoOr::Auto).unwrap()).len();
+        let auto = |n| tests_in(&sides(&docs(n), AutoOr::Auto)).len();
         assert_eq!(auto(2), 1);
         assert_eq!(auto(11), 5);
         assert_eq!(auto(20), 10);
         assert_eq!(auto(30), 10);
         // With enough documents, auto is exactly the 20% split.
         for n in [80, 200] {
-            let auto = split_documents(&docs(n), AutoOr::Auto).unwrap();
-            let fixed = split_documents(&docs(n), AutoOr::Value(20)).unwrap();
+            let auto = sides(&docs(n), AutoOr::Auto);
+            let fixed = sides(&docs(n), AutoOr::Value(20));
             assert!(tests_in(&fixed).len() >= AUTO_MIN_TEST_DOCUMENTS);
             assert_eq!(auto, fixed);
         }
         // A number is respected.
-        assert!(tests_in(&split_documents(&docs(11), AutoOr::Value(20)).unwrap()).len() < 5);
+        assert!(tests_in(&sides(&docs(11), AutoOr::Value(20))).len() < 5);
+    }
+
+    fn sides(docs: &[Document], test_percent: AutoOr<u8>) -> BTreeMap<String, Split> {
+        split_documents(docs, test_percent, None).unwrap().sides
     }
 
     #[test]
-    fn auto_tops_up_in_hash_order() {
-        // Every document `auto` tests at 30 documents is still a test
-        // document with 31, unless the extra one ranks ahead of it.
-        let small = tests_in(&split_documents(&docs(30), AutoOr::Auto).unwrap());
-        let big = tests_in(&split_documents(&docs(31), AutoOr::Auto).unwrap());
-        let moved = small.iter().filter(|d| !big.contains(d)).count();
-        assert!(moved <= 1, "{moved} documents moved");
+    fn adding_documents_never_moves_a_test_document_into_training() {
+        // Grow a project one document at a time, as `prepare` would,
+        // remembering each dataset's threshold.
+        let mut remembered = None;
+        let mut before: Vec<String> = Vec::new();
+        let mut moved_at = Vec::new();
+        for n in 2..=120 {
+            let split = split_documents(&docs(n), AutoOr::Auto, remembered).unwrap();
+            remembered = Some(split.threshold);
+            let tests = tests_in(&split.sides);
+            if before.iter().any(|d| !tests.contains(d)) {
+                moved_at.push(n);
+            }
+            assert!(tests.len() >= AUTO_MIN_TEST_DOCUMENTS.min(n / 2), "{n}");
+            before = tests;
+        }
+        // Once: when the plain 20% split takes over. From then on it is
+        // exactly that split.
+        assert!(moved_at.len() <= 1, "moved at {moved_at:?}");
+        let last = split_documents(&docs(120), AutoOr::Auto, remembered).unwrap();
+        assert_eq!(last.sides, sides(&docs(120), AutoOr::Value(20)));
     }
 
     #[test]
@@ -1372,6 +1464,10 @@ mod tests {
             .collect();
         assert_eq!(test_docs.len(), 8, "every test document keeps a chunk");
         assert!(sampled.iter().any(|c| c.split == Split::Train));
+        // Even past half the sample.
+        let sampled = sample(sampled, 10);
+        let test_docs = sampled.iter().filter(|c| c.split == Split::Test).count();
+        assert_eq!((sampled.len(), test_docs), (10, 8));
     }
 
     #[test]

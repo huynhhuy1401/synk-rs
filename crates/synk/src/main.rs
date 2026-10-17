@@ -423,37 +423,7 @@ fn main() -> ExitCode {
     output::set_verbose(cli.verbose);
     let (json, jsonl) = (cli.json, cli.progress == pipeline::ProgressMode::Jsonl);
     let _ = ctrlc::set_handler(move || output::on_interrupt(json, jsonl));
-    // Tests: simulate Ctrl-C presses after these many milliseconds
-    // (comma-separated), on every OS.
-    if let Ok(delays) = std::env::var("SYNK_TEST_INTERRUPT_AFTER_MS") {
-        let delays: Vec<u64> = delays
-            .split(',')
-            .filter_map(|d| d.trim().parse().ok())
-            .collect();
-        std::thread::spawn(move || {
-            let mut slept = 0;
-            for at in delays {
-                std::thread::sleep(Duration::from_millis(at.saturating_sub(slept)));
-                slept = at;
-                output::on_interrupt(json, jsonl);
-            }
-        });
-    }
-    // Tests: one simulated press per line added to this file, so a test
-    // can press exactly when the run has reached the point it tests.
-    if let Some(path) = std::env::var_os("SYNK_TEST_INTERRUPT_FILE") {
-        std::thread::spawn(move || {
-            let mut pressed = 0;
-            loop {
-                let lines = std::fs::read_to_string(&path).map_or(0, |t| t.lines().count());
-                while pressed < lines {
-                    pressed += 1;
-                    output::on_interrupt(json, jsonl);
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        });
-    }
+    simulate_interrupts(json, jsonl);
     let config = cli.config.as_deref();
     let project = || Project::find(config);
     let progress = || pipeline::Progress::new(cli.progress, cli.json);
@@ -588,6 +558,40 @@ fn usage_error(clap_error: &str) -> SynkError {
 pub fn cli_command() -> clap::Command {
     use clap::CommandFactory;
     Cli::command()
+}
+
+/// Test-only hooks (like SYNK_FAKE_TRAINER) that press Ctrl-C for a test,
+/// on every OS.
+fn simulate_interrupts(json: bool, jsonl: bool) {
+    // Presses after these many milliseconds (comma-separated).
+    if let Ok(delays) = std::env::var("SYNK_TEST_INTERRUPT_AFTER_MS") {
+        let delays: Vec<u64> = delays
+            .split(',')
+            .filter_map(|d| d.trim().parse().ok())
+            .collect();
+        std::thread::spawn(move || {
+            let mut slept = 0;
+            for at in delays {
+                std::thread::sleep(Duration::from_millis(at.saturating_sub(slept)));
+                slept = at;
+                output::on_interrupt(json, jsonl);
+            }
+        });
+    }
+    // One press per line added to this file, so a test can press exactly when the run has reached the point it tests.
+    if let Some(path) = std::env::var_os("SYNK_TEST_INTERRUPT_FILE") {
+        std::thread::spawn(move || {
+            let mut pressed = 0;
+            loop {
+                let lines = std::fs::read_to_string(&path).map_or(0, |t| t.lines().count());
+                while pressed < lines {
+                    pressed += 1;
+                    output::on_interrupt(json, jsonl);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+    }
 }
 
 #[cfg(test)]

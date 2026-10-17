@@ -331,6 +331,15 @@ impl SynkError {
         self
     }
 
+    /// Adds one key to `details` (an object), keeping the others.
+    pub fn with_detail(mut self, key: &str, value: Value) -> Self {
+        if !self.details.is_object() {
+            self.details = Value::Object(serde_json::Map::new());
+        }
+        self.details[key] = value;
+        self
+    }
+
     /// A filesystem error. A full disk (or quota) is `INSUFFICIENT_DISK`,
     /// so the fix is clear.
     pub fn io(context: impl fmt::Display, err: std::io::Error) -> Self {
@@ -343,9 +352,8 @@ impl SynkError {
                 ErrorCode::InsufficientDisk,
                 format!("the disk is full: {context}: {err}"),
             )
-            .with_hint(
-                "free some space, then run the same command again; finished steps are kept",
-            );
+            .with_hint("free some space, then run the same command again; finished steps are kept")
+            .with_detail("path", serde_json::json!(context.to_string()));
         }
         Self::new(ErrorCode::Io, format!("{context}: {err}"))
     }

@@ -33,6 +33,20 @@ pub fn show_path(path: &Path) -> String {
     }
 }
 
+/// `word` as one argument in a `next` command: in double quotes (which
+/// sh, PowerShell and cmd all read) unless it is plain.
+pub fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./\\:".contains(c));
+    if plain {
+        word.to_owned()
+    } else {
+        format!("\"{word}\"")
+    }
+}
+
 /// Version of the `--json` envelope. Within a version, fields and codes are
 /// only ever added.
 pub const CONTRACT_VERSION: u32 = 1;

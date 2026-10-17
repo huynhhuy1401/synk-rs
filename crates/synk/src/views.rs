@@ -97,9 +97,12 @@ pub fn queries_template(
                 .with_next("synk source sync"),
         );
     }
-    let tests =
-        synk_pipeline::dataset::test_document_ids(&docs, project.pipeline().dataset.test_percent)
-            .unwrap_or_default();
+    let tests = synk_pipeline::dataset::test_document_ids(
+        &store,
+        &docs,
+        project.pipeline().dataset.test_percent,
+    )
+    .unwrap_or_default();
     let mut order: Vec<&synk_core::Document> = docs.iter().collect();
     // Test documents first, then the rest; both in a stable shuffled order.
     order.sort_by_key(|d| {
@@ -117,7 +120,7 @@ pub fn queries_template(
     let text = queries::template(&chosen);
     fs::write(out, text).map_err(|e| SynkError::io(out.display(), e))?;
     let path = crate::output::show_path(out);
-    let next = format!("synk queries import {path}");
+    let next = format!("synk queries import {}", crate::output::shell_word(&path));
     Ok(Output {
         human: format!(
             "Wrote {path} with {} documents. For each, write how you'd search for something you know is in it, without opening it. Then: {next}",
@@ -132,6 +135,9 @@ pub fn queries_template(
     })
 }
 
+/// Where `next` hints suggest writing real searches.
+const SEARCHES_FILE: &str = "searches.jsonl";
+
 pub fn list_queries(project: &Project) -> Result<Output> {
     let queries = match project.existing_store()? {
         Some(store) => store.real_queries()?,
@@ -142,7 +148,12 @@ pub fn list_queries(project: &Project) -> Result<Output> {
         let _ = write!(human, "\n  {:<40} -> {}", q.query, q.doc);
     }
     let next = if queries.is_empty() {
-        "synk queries template --out searches.jsonl"
+        // A template written earlier is imported, not overwritten.
+        if Path::new(SEARCHES_FILE).exists() {
+            "synk queries import searches.jsonl"
+        } else {
+            "synk queries template --out searches.jsonl"
+        }
     } else {
         "synk train --dry-run"
     };

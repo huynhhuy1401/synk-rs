@@ -181,7 +181,9 @@ also tests both models on NanoMSMARCO (English web search) and XQuAD
 **Real queries.** Your own searches are the most honest test: they're used
 to test, never to train, and 30 or more about 10+ documents decide the
 verdict. A few become style examples for the LLM instead; they're chosen once
-and kept (`queries import --restyle` chooses again). To write some, let synk
+and kept (`queries import --restyle` chooses again). Choosing them changes
+every chunk's prompt, so the dry run says when it will happen and how many LLM
+calls that costs (`style_examples_change`). To write some, let synk
 list documents for you, and for each write how you'd search for something you
 know is in it, **without opening it** (reading it first copies its words and
 makes the test too easy). About 15 minutes:
@@ -209,8 +211,9 @@ synk export best --out ./m-gguf --format gguf --ollama notes-embed   # Ollama
 
 Every export checks that the exported model's vectors match the original
 (GGUF through Ollama's `/api/embed`; `q8_0` by default, `--quant f16` for an
-exact copy). The README synk writes describes the run and holds none of your
-text. Ollama doesn't add a model's `query: `/`passage: ` prefixes, so apps
+exact copy). GGUF uses llama.cpp's converter, shipped inside synk; the result
+(`data.converter`) and the model's README name its commit. The README synk
+writes describes the run and holds none of your text. Ollama doesn't add a model's `query: `/`passage: ` prefixes, so apps
 embedding through Ollama should add them (advice `PREFIX_DROPPED_BY_TARGET`).
 
 **Using the model.** The model was trained and tested with its query and
@@ -255,7 +258,7 @@ allow_remote = false        # must be true to send chunks to a server not on thi
 
 [dataset]
 chunk_tokens = "auto"       # fills what the model reads (trainer.max_seq_length)
-test_percent = 20
+test_percent = "auto"       # at least 10 test documents where possible (20%-50%); or a number
 # max_chunks = 200          # a sample, for a quick run (or: --sample 200)
 
 [trainer]
@@ -288,11 +291,12 @@ weights and speed history live in `$SYNK_HOME` (default
 `%LOCALAPPDATA%\synk` / `~/.local/share/synk`) and the Hugging Face cache.
 
 **Disk space.** `train --dry-run` lists what the run will write on each drive
-(`data.disk`: downloads, and training checkpoints, about 20 bytes per
-parameter for full fine-tuning, 8 for LoRA) against the space free there, and
-blocks with `INSUFFICIENT_DISK` when it won't fit. The sizes are estimates;
-if one is wrong for you, `SYNK_DISK_CHECK=warn` turns the block into a
-warning.
+(`data.disk`: downloads, the dataset, about twice your documents' text, and
+training checkpoints, about 20 bytes per parameter for full fine-tuning, 8 for
+LoRA) against the space free there, and blocks with `INSUFFICIENT_DISK` when it
+won't fit. The sizes are estimates; if one is wrong for you,
+`SYNK_DISK_CHECK=warn` turns the block into a warning. If a disk fills up
+anyway, the error's `details` name the step and the path.
 
 ## For agents
 
@@ -394,7 +398,7 @@ a better result: `code`, `severity`, `message`, `evidence`, `action`
 | `DOWNLOAD_FAILED` | A download failed after retries |
 | `DEVICE_UNSUPPORTED` | No PyTorch build or device for the requested backend |
 | `OUT_OF_MEMORY` | Training ran out of memory; `actions` suggest a smaller batch or LoRA |
-| `INSUFFICIENT_DISK` | A drive the run writes to lacks space (a `train --dry-run` blocker with `details` per drive), or filled up during the run |
+| `INSUFFICIENT_DISK` | A drive the run writes to lacks space (a `train --dry-run` blocker with `details` per drive), or filled up during the run (`details.step`, `details.path`) |
 | `DATASET_NOT_FOUND` / `DATASET_TOO_SMALL` | No dataset; too few documents or queries |
 | `RUN_INCOMPLETE` / `RUN_NOT_FOUND` / `RUNS_NOT_COMPARABLE` | Run lookups and comparisons |
 | `QUERIES_INVALID` | `queries import`: a bad line; nothing was imported |

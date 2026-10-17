@@ -1096,7 +1096,8 @@ def main(argv):
         # A full disk, however PyTorch words it, is something the user can fix.
         full = isinstance(e, OSError) and e.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", -1))
         if full or "No space left on device" in str(e) or "file write failed" in str(e):
-            emit("error", code="INSUFFICIENT_DISK", message=f"the disk is full: {e}")
+            emit("error", code="INSUFFICIENT_DISK", message=f"the disk is full: {e}",
+                 path=getattr(e, "filename", None))
             return 1
         import traceback
 

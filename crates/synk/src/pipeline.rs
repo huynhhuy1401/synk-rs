@@ -485,6 +485,7 @@ Ollama model: {}",
             "check": exported.check,
             "ollama": exported.ollama,
             "usage": exported.usage,
+            "converter": exported.converter,
             "advice": exported.advice,
         }),
     })

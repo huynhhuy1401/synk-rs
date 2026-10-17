@@ -1027,6 +1027,18 @@ fn a_template_of_searches_imports_and_style_examples_stay_fixed() {
     assert_eq!(imported["data"]["documents"], 8);
     assert_eq!(imported["data"]["decides_verdict"], false);
 
+    // The dry run says the examples are about to be chosen.
+    let step = dataset_step(&synk(root, &["dataset", "--dry-run"]));
+    assert_eq!(step["detail"]["style_examples_change"], true, "{step}");
+    assert!(
+        step["why"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("style examples")),
+        "{step}"
+    );
+
     // Build once: 2 of the 8 become style examples, then stay.
     synk(root, &["dataset"]);
     let listed = synk(root, &["queries", "list"]);
@@ -1063,6 +1075,228 @@ fn a_template_of_searches_imports_and_style_examples_stay_fixed() {
     assert_eq!(restyled["data"]["restyled"], true);
 }
 
+/// A project of `n` notes, each its own topic, with the fake generator and
+/// the tiny model.
+fn project_of(n: usize) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("notes")).unwrap();
+    add_notes(root, 0..n);
+    synk(root, &["init"]);
+    append_config(root, "\n[eval]\ngeneral_check = false\n");
+    synk(root, &["source", "add", "notes"]);
+    with_generator_and_tiny_model(root, &fake_llm());
+    dir
+}
+
+fn add_notes(root: &Path, range: std::ops::Range<usize>) {
+    for i in range {
+        fs::write(
+            root.join(format!("notes/n{i}.md")),
+            format!("# Note {i}\n\nTopic number {i} is about subject {i}."),
+        )
+        .unwrap();
+    }
+}
+
+/// The test documents of the dataset `synk dataset` just built.
+fn built_test_documents(root: &Path) -> Vec<String> {
+    let built = synk(root, &["dataset"]);
+    assert_eq!(built["ok"], true, "{built}");
+    let key = built["data"]["op"]["key"].as_str().unwrap();
+    let corpus =
+        fs::read_to_string(root.join(format!(".synk/artifacts/dataset/{key}/corpus.jsonl")))
+            .unwrap();
+    let mut docs: Vec<String> = corpus
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .filter(|c| c["split"] == "test")
+        .map(|c| c["doc"].as_str().unwrap().to_owned())
+        .collect();
+    docs.sort();
+    docs.dedup();
+    docs
+}
+
+fn dataset_step(preview: &Value) -> Value {
+    preview["data"]["steps"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no steps: {preview}"))
+        .iter()
+        .find(|s| s["step"] == "dataset")
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn auto_holds_out_enough_test_documents_and_adding_documents_keeps_them() {
+    let dir = project_of(11);
+    let root = dir.path();
+    // 11 documents: 5 test documents (at most half), not 20%'s 2.
+    let first = built_test_documents(root);
+    assert_eq!(first.len(), 5, "{first:?}");
+    // More documents: every test document stays one, and the test grows
+    // to 10.
+    add_notes(root, 11..26);
+    let second = built_test_documents(root);
+    assert!(
+        first.iter().all(|d| second.contains(d)),
+        "{first:?} -> {second:?}"
+    );
+    assert!(second.len() >= 10, "{second:?}");
+}
+
+#[test]
+fn a_big_project_keeps_the_plain_twenty_percent_split() {
+    let dir = project_of(200);
+    let root = dir.path();
+    let auto = dataset_step(&synk(root, &["train", "--dry-run"]));
+    let plain = dataset_step(&synk(
+        root,
+        &["train", "--dry-run", "--set", "dataset.test_percent=20"],
+    ));
+    assert!(auto["detail"]["test_documents"].as_u64().unwrap() >= 10);
+    for field in ["test_documents", "test_chunks", "train_chunks"] {
+        assert_eq!(auto["detail"][field], plain["detail"][field], "{field}");
+    }
+}
+
+#[test]
+fn a_sample_keeps_every_test_document() {
+    let dir = project_of(30);
+    let root = dir.path();
+    let full = synk(root, &["train", "--dry-run"]);
+    let tests = dataset_step(&full)["detail"]["test_documents"].clone();
+    assert_eq!(tests, 10, "{full}");
+    let sampled = synk(root, &["train", "--dry-run", "--sample", "14"]);
+    let step = dataset_step(&sampled);
+    assert_eq!(step["detail"]["chunks"], 14, "{step}");
+    assert_eq!(step["detail"]["test_documents"], tests, "{step}");
+}
+
+#[test]
+fn of_two_trains_started_together_exactly_one_runs() {
+    let dir = bigger_project();
+    let root = dir.path();
+    synk(root, &["dataset"]);
+    let start = || {
+        command(root, &[("SYNK_FAKE_TRAINER_SLOW", "1000")])
+            .args(["--json", "train"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let (a, b) = (start(), start());
+    let results = [a, b].map(|c| parse(&c.wait_with_output().unwrap()));
+    let blocked: Vec<&Value> = results.iter().filter(|r| r["ok"] == false).collect();
+    assert_eq!(blocked.len(), 1, "{results:?}");
+    assert_eq!(error_code(blocked[0]), "JOB_RUNNING", "{}", blocked[0]);
+}
+
+#[test]
+fn real_searches_decide_the_verdict_at_thirty_about_ten_documents() {
+    let dir = project_of(30);
+    let root = dir.path();
+    sync(root);
+    // The template lists the test documents first.
+    synk(
+        root,
+        &[
+            "queries",
+            "template",
+            "--out",
+            "t.jsonl",
+            "--documents",
+            "10",
+        ],
+    );
+    let docs: Vec<String> = fs::read_to_string(root.join("t.jsonl"))
+        .unwrap()
+        .lines()
+        .skip(1)
+        .map(|l| {
+            serde_json::from_str::<Value>(l).unwrap()["doc"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    let searches = |docs: &[String]| {
+        let mut text = String::new();
+        for doc in docs {
+            for k in 0..5 {
+                text.push_str(&format!(
+                    "{{\"query\": \"{doc} search {k}\", \"doc\": \"{doc}\"}}\n"
+                ));
+            }
+        }
+        text
+    };
+    // 45 searches about 9 documents: they don't decide yet.
+    fs::write(root.join("s.jsonl"), searches(&docs[..9])).unwrap();
+    synk(root, &["queries", "import", "s.jsonl"]);
+    let trained = synk(root, &["train"]);
+    assert_ne!(
+        trained["data"]["verdict"]["query_kind"], "real",
+        "{trained}"
+    );
+    let advice = trained["data"]["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["code"] == "REAL_QUERIES_FEW_DOCUMENTS")
+        .unwrap_or_else(|| panic!("no advice: {trained}"))
+        .clone();
+    assert_eq!(advice["evidence"]["more_documents"], 1, "{advice}");
+    // The tenth document's searches: now they decide.
+    fs::write(root.join("s.jsonl"), searches(&docs)).unwrap();
+    synk(root, &["queries", "import", "s.jsonl"]);
+    let trained = synk(root, &["train"]);
+    assert_eq!(
+        trained["data"]["verdict"]["query_kind"], "real",
+        "{trained}"
+    );
+}
+
+/// A real Ctrl-C (SIGINT), not the test hook.
+#[cfg(unix)]
+#[test]
+fn sigint_stops_at_a_safe_point() {
+    let dir = bigger_project();
+    let root = dir.path();
+    synk(root, &["dataset"]);
+    let child = command(root, &[("SYNK_FAKE_TRAINER_SLOW", "20000")])
+        .args(["--json", "train"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    loop {
+        let j = synk(root, &["wait", "--timeout", "0s"]);
+        let training = j["data"]["progress"]["step"] == "train"
+            || j["data"]["steps"]
+                .as_array()
+                .is_some_and(|s| s.iter().any(|s| s["step"] == "dataset"));
+        if j["data"]["state"] == "running" && training {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(60), "never trained");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let killed = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(130));
+    let stopped: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(error_code(&stopped), "CANCELLED", "{stopped}");
+    assert_eq!(stopped["error"]["details"]["how"], "safe_stop");
+}
+
 #[test]
 fn the_dry_run_checks_free_disk_space() {
     let dir = synced_project();
@@ -1082,8 +1316,17 @@ fn the_dry_run_checks_free_disk_space() {
         "{plenty}"
     );
     let disk = &plenty["data"]["disk"][0];
-    assert_eq!(disk["need_bytes"], 20_000, "{plenty}");
-    assert_eq!(disk["needs"][0]["what"], "training checkpoints and models");
+    let needs: Vec<(&str, u64)> = disk["needs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| (n["what"].as_str().unwrap(), n["bytes"].as_u64().unwrap()))
+        .collect();
+    // The dataset (twice the documents' text, plus 1 MB) and training.
+    assert_eq!(needs[0].0, "the dataset", "{plenty}");
+    assert!(needs[0].1 > 1_000_000);
+    assert_eq!(needs[1], ("training checkpoints and models", 20_000));
+    assert_eq!(disk["need_bytes"], needs[0].1 + 20_000);
 
     let full = synk_env(root, &train_args, &[("SYNK_TEST_FREE_BYTES", "1000")]);
     let blocker = &full["data"]["blockers"][0];
