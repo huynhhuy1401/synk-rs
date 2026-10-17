@@ -310,8 +310,6 @@ impl Preview {
     }
 }
 
-/// The fetch name of a Hugging Face model: its catalog ID or `hf:org/name`,
-/// with `@` and the start of its commit when pinned.
 /// About how much the trainer's packages download for a backend.
 pub fn trainer_bytes(backend: sidecar::Backend) -> u64 {
     if backend == sidecar::Backend::Cpu {
@@ -321,6 +319,8 @@ pub fn trainer_bytes(backend: sidecar::Backend) -> u64 {
     }
 }
 
+/// The fetch name of a Hugging Face model: its catalog ID or `hf:org/name`,
+/// with `@` and the start of its commit when pinned.
 pub fn fetch_name(spec: &ModelSpec) -> String {
     let base = spec
         .catalog_id

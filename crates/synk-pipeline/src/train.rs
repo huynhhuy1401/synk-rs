@@ -646,6 +646,12 @@ impl Names {
     }
 }
 
+/// Whether this many real queries, about this many documents, decide the
+/// verdict instead of the generated test.
+pub fn real_queries_decide(queries: usize, documents: u64) -> bool {
+    queries >= MIN_REAL_QUERIES && documents >= MIN_REAL_DOCUMENTS
+}
+
 fn decide(rows: &[QueryRanks], names: &Names) -> Verdict {
     let (real, synthetic): (Vec<&QueryRanks>, Vec<&QueryRanks>) =
         rows.iter().partition(|r| r.kind == "real");
@@ -655,9 +661,7 @@ fn decide(rows: &[QueryRanks], names: &Names) -> Verdict {
     }
     let mut real_v = judge_with_langs(&real, names, "real queries");
     real_v.query_kind = "real".to_owned();
-    let mut chosen = if real.len() >= MIN_REAL_QUERIES
-        && real_v.test_documents >= MIN_REAL_DOCUMENTS
-    {
+    let mut chosen = if real_queries_decide(real.len(), real_v.test_documents) {
         real_v.clone()
     } else {
         let mut v = synthetic_v.clone();

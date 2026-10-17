@@ -36,8 +36,10 @@ pub fn import_queries(
     // Style examples are left out of evaluation, so only the rest count.
     let evaluated = synk_pipeline::dataset::evaluated_real_queries(&store)?;
     let next = "synk train --dry-run";
-    let decides = evaluated.len() >= MIN_REAL_QUERIES
-        && distinct_documents(&evaluated) as u64 >= MIN_REAL_DOCUMENTS;
+    // A forecast: the dataset also skips searches about a document with no
+    // text left to test on.
+    let decides =
+        train::real_queries_decide(evaluated.len(), distinct_documents(&evaluated) as u64);
     let mut human = format!(
         "Real queries: {} added, {} already there, {} removed; {total} in total, about {documents} documents.",
         stats.added, stats.unchanged, stats.removed,

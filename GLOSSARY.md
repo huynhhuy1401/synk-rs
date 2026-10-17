@@ -177,9 +177,9 @@ Writing a tuned model in a format other programs load (sentence-transformers
 folder, ONNX, GGUF) and checking that its vectors match.
 _Avoid_: publish, save
 
-**Style pool**:
+**Style examples** (together, the _style pool_):
 A few real queries shown to the query generator as examples of how the user
-searches, and therefore left out of evaluation.
+searches, and therefore left out of evaluation. Chosen once, then kept.
 _Avoid_: few-shot set
 
 **Trainer**:
