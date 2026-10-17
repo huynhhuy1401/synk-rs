@@ -492,6 +492,13 @@ pub fn setup(
     // A half-built environment (an interrupted install) is rebuilt.
     let reused = python.exists() && !force && describe(&python).is_ok();
     if !reused {
+        // `synk setup` is the usual way here, so it checks too, not only
+        // `synk fetch trainer`.
+        crate::graph::check_space(vec![crate::disk::Need {
+            what: format!("trainer (Python, PyTorch {})", backend.as_str()),
+            path: home.clone(),
+            bytes: crate::graph::trainer_bytes(backend) * crate::disk::TRAINER_UNPACKED,
+        }])?;
         let uv = find_uv(uv)?;
         if env_dir.exists() {
             fs::remove_dir_all(&env_dir).map_err(|e| SynkError::io(env_dir.display(), e))?;

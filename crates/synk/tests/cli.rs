@@ -1564,6 +1564,13 @@ fn setup_rejects_backends_pytorch_does_not_build() {
         assert_eq!(error_code(&out), "DEVICE_UNSUPPORTED");
         assert_eq!(out["error"]["next"], "synk setup --backend cpu");
     }
+    // A trainer that won't fit stops before anything downloads.
+    let full = synk_env(
+        dir.path(),
+        &["setup", "--backend", "cpu"],
+        &[("SYNK_FAKE_TRAINER", "0"), ("SYNK_TEST_FREE_BYTES", "1000")],
+    );
+    assert_eq!(error_code(&full), "INSUFFICIENT_DISK", "{full}");
 }
 
 #[test]
